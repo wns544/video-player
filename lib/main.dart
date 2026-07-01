@@ -129,6 +129,19 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  Future<void> _switchGoogleAccount() async {
+    await _guarded(() async {
+      await _signIn.signOut();
+      setState(() {
+        _user = null;
+        _accessToken = null;
+        _status = '다른 Google 계정을 선택하세요.';
+      });
+      final user = await _signIn.authenticate();
+      await _setUser(user);
+    });
+  }
+
   Future<void> _setUser(GoogleSignInAccount user) async {
     final headers = await user.authorizationClient.authorizationHeaders(
       _driveScopes,
@@ -280,6 +293,12 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title: const Text('Drive Shuffle'),
         actions: [
+          if (_user != null)
+            IconButton(
+              tooltip: '계정 바꾸기',
+              onPressed: _busy || _initializing ? null : _switchGoogleAccount,
+              icon: const Icon(Icons.switch_account_outlined),
+            ),
           IconButton(
             tooltip: 'Google 로그인',
             onPressed: _busy || _initializing ? null : _signInWithGoogle,
