@@ -16,6 +16,7 @@ const _driveScopes = <String>[
 ];
 const _serverClientId =
     '160619668600-gmrtfcj8gfv3q5t3qr3936qifj453ccb.apps.googleusercontent.com';
+const _driveFolderMimeType = 'application/vnd.google-apps.folder';
 
 class DriveShuffleApp extends StatelessWidget {
   const DriveShuffleApp({super.key});
@@ -61,11 +62,46 @@ class VideoItem {
   };
 }
 
-class DriveFolder {
-  const DriveFolder({required this.id, required this.name});
+enum DriveEntryType { folder, video }
+
+class DriveEntry {
+  const DriveEntry({
+    required this.id,
+    required this.name,
+    required this.type,
+    required this.mimeType,
+    this.modifiedTime,
+    this.size,
+  });
 
   final String id;
   final String name;
+  final DriveEntryType type;
+  final String mimeType;
+  final DateTime? modifiedTime;
+  final int? size;
+
+  bool get isFolder => type == DriveEntryType.folder;
+  bool get isVideo => type == DriveEntryType.video;
+
+  VideoItem toVideoItem() {
+    return VideoItem(
+      id: 'drive:$id',
+      title: name,
+      uri: 'https://www.googleapis.com/drive/v3/files/$id?alt=media',
+      source: VideoSource.drive,
+    );
+  }
+}
+
+class DriveImportResult {
+  const DriveImportResult({
+    required this.items,
+    required this.sourceName,
+  });
+
+  final List<VideoItem> items;
+  final String sourceName;
 }
 
 class HomePage extends StatefulWidget {
@@ -173,30 +209,44 @@ class _HomePageState extends State<HomePage> {
           uri: uri,
           source: VideoSource.local,
         );
-      });
+      }).toList();
 
+      final added = _addUniqueVideos(picked);
       setState(() {
-        _videos.addAll(picked);
-        _status = '로컬 영상 ${result.length}개 추가됨';
+        _status = added == 0
+            ? '이미 추가된 로컬 영상입니다.'
+            : '로컬 영상 $added개 추가됨';
       });
     });
   }
 
-  Future<void> _chooseDriveFolder() async {
+  Future<void> _openDriveBrowser() async {
     await _guarded(() async {
       if (!await _ensureDriveReady()) return;
       if (!mounted) return;
 
-      final folder = await showDialog<DriveFolder>(
+      final result = await showDialog<DriveImportResult>(
         context: context,
-        builder: (context) => _DriveFolderPicker(
-          loadFolders: _listDriveFolders,
+        builder: (context) => _DriveBrowserDialog(
+          loadEntries: _listDriveEntries,
         ),
       );
-      if (folder == null) return;
+      if (result == null || result.items.isEmpty) return;
 
-      await _loadDriveFolderById(folder.id, folder.name);
+      final added = _addUniqueVideos(result.items);
+      setState(() {
+        _status = added == 0
+            ? '이미 추가된 Drive 영상입니다.'
+            : '${result.sourceName}에서 Drive 영상 $added개 추가됨';
+      });
     });
+  }
+
+  int _addUniqueVideos(List<VideoItem> items) {
+    final knownIds = _videos.map((item) => item.id).toSet();
+    final uniqueItems = items.where((item) => knownIds.add(item.id)).toList();
+    setState(() => _videos.addAll(uniqueItems));
+    return uniqueItems.length;
   }
 
   Future<bool> _ensureDriveReady() async {
@@ -207,15 +257,15 @@ class _HomePageState extends State<HomePage> {
     return true;
   }
 
-  Future<List<DriveFolder>> _listDriveFolders(String parentId) async {
+  Future<List<DriveEntry>> _listDriveEntries(String parentId) async {
     final query = Uri.encodeQueryComponent(
       "'$parentId' in parents and trashed=false and "
-      "mimeType='application/vnd.google-apps.folder'",
+      "(mimeType='$_driveFolderMimeType' or mimeType contains 'video/')",
     );
     final url = Uri.parse(
       'https://www.googleapis.com/drive/v3/files'
       '?q=$query'
-      '&fields=files(id,name)'
+      '&fields=files(id,name,mimeType,size,modifiedTime)'
       '&orderBy=name'
       '&pageSize=1000'
       '&supportsAllDrives=true'
@@ -223,43 +273,25 @@ class _HomePageState extends State<HomePage> {
     );
     final body = await _driveGet(url);
     final files = body['files'] as List<Object?>? ?? const [];
-    return files.cast<Map<String, Object?>>().map((file) {
-      return DriveFolder(
+    final entries = files.cast<Map<String, Object?>>().map((file) {
+      final mimeType = file['mimeType'] as String? ?? '';
+      return DriveEntry(
         id: file['id']! as String,
-        name: file['name'] as String? ?? 'Untitled folder',
-      );
-    }).toList();
-  }
-
-  Future<void> _loadDriveFolderById(String folderId, String folderName) async {
-    final encodedQuery = Uri.encodeQueryComponent(
-      "'$folderId' in parents and trashed=false and mimeType contains 'video/'",
-    );
-    final url = Uri.parse(
-      'https://www.googleapis.com/drive/v3/files'
-      '?q=$encodedQuery'
-      '&fields=files(id,name,mimeType,size,modifiedTime)'
-      '&pageSize=1000'
-      '&supportsAllDrives=true'
-      '&includeItemsFromAllDrives=true',
-    );
-    final body = await _driveGet(url);
-    final files = body['files'] as List<Object?>? ?? const [];
-    final driveItems = files.cast<Map<String, Object?>>().map((file) {
-      final id = file['id']! as String;
-      return VideoItem(
-        id: 'drive:$id',
-        title: file['name'] as String? ?? 'Drive video',
-        uri: 'https://www.googleapis.com/drive/v3/files/$id?alt=media',
-        source: VideoSource.drive,
+        name: file['name'] as String? ?? '이름 없음',
+        mimeType: mimeType,
+        type: mimeType == _driveFolderMimeType
+            ? DriveEntryType.folder
+            : DriveEntryType.video,
+        modifiedTime: DateTime.tryParse(file['modifiedTime'] as String? ?? ''),
+        size: int.tryParse(file['size'] as String? ?? ''),
       );
     }).toList();
 
-    setState(() {
-      _videos.removeWhere((item) => item.source == VideoSource.drive);
-      _videos.addAll(driveItems);
-      _status = '$folderName 폴더에서 Drive 영상 ${driveItems.length}개 불러옴';
+    entries.sort((a, b) {
+      if (a.type != b.type) return a.isFolder ? -1 : 1;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
     });
+    return entries;
   }
 
   Future<Map<String, Object?>> _driveGet(Uri url) async {
@@ -360,7 +392,7 @@ class _HomePageState extends State<HomePage> {
             _ActionGrid(
               busy: _busy || _initializing,
               onAddLocal: _addLocalVideos,
-              onAddDrive: _chooseDriveFolder,
+              onAddDrive: _openDriveBrowser,
               onPlay: _playShuffled,
               onPause: () => _invokePlayer('playPause'),
               onNext: () => _invokePlayer('next'),
@@ -383,67 +415,102 @@ class _HomePageState extends State<HomePage> {
   }
 }
 
-class _DriveFolderPicker extends StatefulWidget {
-  const _DriveFolderPicker({required this.loadFolders});
+class _DriveBrowserDialog extends StatefulWidget {
+  const _DriveBrowserDialog({required this.loadEntries});
 
-  final Future<List<DriveFolder>> Function(String parentId) loadFolders;
+  final Future<List<DriveEntry>> Function(String parentId) loadEntries;
 
   @override
-  State<_DriveFolderPicker> createState() => _DriveFolderPickerState();
+  State<_DriveBrowserDialog> createState() => _DriveBrowserDialogState();
 }
 
-class _DriveFolderPickerState extends State<_DriveFolderPicker> {
-  final List<DriveFolder> _path = const [
-    DriveFolder(id: 'root', name: '내 드라이브'),
+class _DriveBrowserDialogState extends State<_DriveBrowserDialog> {
+  final List<DriveEntry> _path = const [
+    DriveEntry(
+      id: 'root',
+      name: '내 드라이브',
+      type: DriveEntryType.folder,
+      mimeType: _driveFolderMimeType,
+    ),
   ].toList();
-  late Future<List<DriveFolder>> _folders = widget.loadFolders(_current.id);
+  late Future<List<DriveEntry>> _entries = widget.loadEntries(_current.id);
+  List<DriveEntry> _visibleEntries = const [];
 
-  DriveFolder get _current => _path.last;
+  DriveEntry get _current => _path.last;
 
-  void _open(DriveFolder folder) {
+  void _openFolder(DriveEntry folder) {
     setState(() {
       _path.add(folder);
-      _folders = widget.loadFolders(folder.id);
+      _visibleEntries = const [];
+      _entries = widget.loadEntries(folder.id);
     });
   }
 
-  void _back() {
+  void _goUp() {
     if (_path.length <= 1) return;
     setState(() {
       _path.removeLast();
-      _folders = widget.loadFolders(_current.id);
+      _visibleEntries = const [];
+      _entries = widget.loadEntries(_current.id);
     });
+  }
+
+  void _refresh() {
+    setState(() {
+      _visibleEntries = const [];
+      _entries = widget.loadEntries(_current.id);
+    });
+  }
+
+  void _selectVideo(DriveEntry entry) {
+    Navigator.pop(
+      context,
+      DriveImportResult(
+        items: [entry.toVideoItem()],
+        sourceName: entry.name,
+      ),
+    );
+  }
+
+  void _addCurrentFolderVideos() {
+    final videos = _visibleEntries
+        .where((entry) => entry.isVideo)
+        .map((entry) => entry.toVideoItem())
+        .toList();
+    Navigator.pop(
+      context,
+      DriveImportResult(items: videos, sourceName: _current.name),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    final videoCount = _visibleEntries.where((entry) => entry.isVideo).length;
+
     return AlertDialog(
-      title: Text(_current.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      title: const Text('Google Drive에서 가져오기'),
       content: SizedBox(
         width: double.maxFinite,
-        height: 420,
+        height: 520,
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                IconButton(
-                  tooltip: '상위 폴더',
-                  onPressed: _path.length > 1 ? _back : null,
-                  icon: const Icon(Icons.arrow_upward),
-                ),
-                Expanded(
-                  child: Text(
-                    _path.map((folder) => folder.name).join(' / '),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
+            _DrivePathBar(
+              path: _path,
+              onGoUp: _path.length > 1 ? _goUp : null,
+              onRefresh: _refresh,
             ),
-            const Divider(),
+            const SizedBox(height: 8),
+            FilledButton.icon(
+              onPressed: videoCount > 0 ? _addCurrentFolderVideos : null,
+              icon: const Icon(Icons.playlist_add),
+              label: Text('현재 폴더 영상 추가 ($videoCount)'),
+            ),
+            const SizedBox(height: 8),
+            const Divider(height: 1),
             Expanded(
-              child: FutureBuilder<List<DriveFolder>>(
-                future: _folders,
+              child: FutureBuilder<List<DriveEntry>>(
+                future: _entries,
                 builder: (context, snapshot) {
                   if (snapshot.connectionState != ConnectionState.done) {
                     return const Center(child: CircularProgressIndicator());
@@ -451,23 +518,26 @@ class _DriveFolderPickerState extends State<_DriveFolderPicker> {
                   if (snapshot.hasError) {
                     return Center(child: Text(snapshot.error.toString()));
                   }
-                  final folders = snapshot.data ?? const [];
-                  if (folders.isEmpty) {
-                    return const Center(child: Text('하위 폴더가 없습니다.'));
+
+                  final entries = snapshot.data ?? const [];
+                  _visibleEntries = entries;
+                  if (entries.isEmpty) {
+                    return const Center(
+                      child: Text('이 폴더에는 하위 폴더나 영상이 없습니다.'),
+                    );
                   }
-                  return ListView.builder(
-                    itemCount: folders.length,
+
+                  return ListView.separated(
+                    itemCount: entries.length,
+                    separatorBuilder: (context, index) =>
+                        const Divider(height: 1),
                     itemBuilder: (context, index) {
-                      final folder = folders[index];
-                      return ListTile(
-                        leading: const Icon(Icons.folder_outlined),
-                        title: Text(
-                          folder.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        trailing: const Icon(Icons.chevron_right),
-                        onTap: () => _open(folder),
+                      final entry = entries[index];
+                      return _DriveEntryTile(
+                        entry: entry,
+                        onTap: entry.isFolder
+                            ? () => _openFolder(entry)
+                            : () => _selectVideo(entry),
                       );
                     },
                   );
@@ -480,16 +550,99 @@ class _DriveFolderPickerState extends State<_DriveFolderPicker> {
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(context),
-          child: const Text('취소'),
-        ),
-        FilledButton.icon(
-          onPressed: () => Navigator.pop(context, _current),
-          icon: const Icon(Icons.check),
-          label: const Text('이 폴더 선택'),
+          child: const Text('닫기'),
         ),
       ],
     );
   }
+}
+
+class _DrivePathBar extends StatelessWidget {
+  const _DrivePathBar({
+    required this.path,
+    required this.onGoUp,
+    required this.onRefresh,
+  });
+
+  final List<DriveEntry> path;
+  final VoidCallback? onGoUp;
+  final VoidCallback onRefresh;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        IconButton(
+          tooltip: '상위 폴더',
+          onPressed: onGoUp,
+          icon: const Icon(Icons.arrow_upward),
+        ),
+        IconButton(
+          tooltip: '새로고침',
+          onPressed: onRefresh,
+          icon: const Icon(Icons.refresh),
+        ),
+        Expanded(
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Text(
+              path.map((entry) => entry.name).join(' / '),
+              maxLines: 1,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _DriveEntryTile extends StatelessWidget {
+  const _DriveEntryTile({
+    required this.entry,
+    required this.onTap,
+  });
+
+  final DriveEntry entry;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: Icon(
+        entry.isFolder ? Icons.folder_outlined : Icons.movie_outlined,
+      ),
+      title: Text(entry.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: entry.isFolder ? const Text('폴더') : Text(_videoDescription(entry)),
+      trailing: Icon(entry.isFolder ? Icons.chevron_right : Icons.add_circle),
+      onTap: onTap,
+    );
+  }
+
+  String _videoDescription(DriveEntry entry) {
+    final parts = <String>[];
+    if (entry.size != null) parts.add(_formatBytes(entry.size!));
+    if (entry.modifiedTime != null) parts.add(_formatDate(entry.modifiedTime!));
+    return parts.isEmpty ? '영상 파일' : parts.join(' · ');
+  }
+
+  String _formatBytes(int bytes) {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var size = bytes.toDouble();
+    var unitIndex = 0;
+    while (size >= 1024 && unitIndex < units.length - 1) {
+      size /= 1024;
+      unitIndex++;
+    }
+    final digits = unitIndex == 0 ? 0 : 1;
+    return '${size.toStringAsFixed(digits)} ${units[unitIndex]}';
+  }
+
+  String _formatDate(DateTime dateTime) {
+    final local = dateTime.toLocal();
+    return '${local.year}.${_two(local.month)}.${_two(local.day)}';
+  }
+
+  String _two(int value) => value.toString().padLeft(2, '0');
 }
 
 class _StatusPanel extends StatelessWidget {
