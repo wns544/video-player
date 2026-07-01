@@ -61,6 +61,13 @@ class VideoItem {
   };
 }
 
+class DriveFolder {
+  const DriveFolder({required this.id, required this.name});
+
+  final String id;
+  final String name;
+}
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -71,7 +78,6 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   static const _playback = MethodChannel('drive_shuffle_player/playback');
 
-  final _folderController = TextEditingController();
   final _signIn = GoogleSignIn.instance;
   final _random = Random();
 
@@ -86,12 +92,6 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     unawaited(_initializeGoogleSignIn());
-  }
-
-  @override
-  void dispose() {
-    _folderController.dispose();
-    super.dispose();
   }
 
   Future<void> _initializeGoogleSignIn() async {
@@ -182,63 +182,103 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  Future<void> _loadDriveFolder() async {
+  Future<void> _chooseDriveFolder() async {
     await _guarded(() async {
-      final folderId = _folderController.text.trim();
-      if (folderId.isEmpty) {
-        _showMessage('Google Drive 폴더 ID를 입력하세요.');
-        return;
-      }
-      if (_user == null || _accessToken == null) {
-        _showMessage('먼저 Google 계정으로 로그인하세요.');
-        return;
-      }
+      if (!await _ensureDriveReady()) return;
+      if (!mounted) return;
 
-      final encodedQuery = Uri.encodeQueryComponent(
-        "'$folderId' in parents and trashed=false and mimeType contains 'video/'",
+      final folder = await showDialog<DriveFolder>(
+        context: context,
+        builder: (context) => _DriveFolderPicker(
+          loadFolders: _listDriveFolders,
+        ),
       );
-      final url = Uri.parse(
-        'https://www.googleapis.com/drive/v3/files'
-        '?q=$encodedQuery'
-        '&fields=files(id,name,mimeType,size,modifiedTime)'
-        '&pageSize=1000'
-        '&supportsAllDrives=true'
-        '&includeItemsFromAllDrives=true',
-      );
-      final response = await http.get(
-        url,
-        headers: {'Authorization': 'Bearer $_accessToken'},
-      );
+      if (folder == null) return;
 
-      if (response.statusCode == 401 || response.statusCode == 403) {
-        await _user!.authorizationClient.clearAuthorizationToken(
-          accessToken: _accessToken!,
-        );
-        await _setUser(_user!);
-        throw StateError('Drive 권한이 만료됐습니다. 다시 시도하세요.');
-      }
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw StateError('Drive 목록 조회 실패 (${response.statusCode})');
-      }
-
-      final body = jsonDecode(response.body) as Map<String, Object?>;
-      final files = (body['files'] as List<Object?>? ?? const []);
-      final driveItems = files.cast<Map<String, Object?>>().map((file) {
-        final id = file['id']! as String;
-        return VideoItem(
-          id: 'drive:$id',
-          title: file['name'] as String? ?? 'Drive video',
-          uri: 'https://www.googleapis.com/drive/v3/files/$id?alt=media',
-          source: VideoSource.drive,
-        );
-      }).toList();
-
-      setState(() {
-        _videos.removeWhere((item) => item.source == VideoSource.drive);
-        _videos.addAll(driveItems);
-        _status = 'Drive 영상 ${driveItems.length}개 불러옴';
-      });
+      await _loadDriveFolderById(folder.id, folder.name);
     });
+  }
+
+  Future<bool> _ensureDriveReady() async {
+    if (_user == null || _accessToken == null) {
+      _showMessage('먼저 Google 계정으로 로그인하세요.');
+      return false;
+    }
+    return true;
+  }
+
+  Future<List<DriveFolder>> _listDriveFolders(String parentId) async {
+    final query = Uri.encodeQueryComponent(
+      "'$parentId' in parents and trashed=false and "
+      "mimeType='application/vnd.google-apps.folder'",
+    );
+    final url = Uri.parse(
+      'https://www.googleapis.com/drive/v3/files'
+      '?q=$query'
+      '&fields=files(id,name)'
+      '&orderBy=name'
+      '&pageSize=1000'
+      '&supportsAllDrives=true'
+      '&includeItemsFromAllDrives=true',
+    );
+    final body = await _driveGet(url);
+    final files = body['files'] as List<Object?>? ?? const [];
+    return files.cast<Map<String, Object?>>().map((file) {
+      return DriveFolder(
+        id: file['id']! as String,
+        name: file['name'] as String? ?? 'Untitled folder',
+      );
+    }).toList();
+  }
+
+  Future<void> _loadDriveFolderById(String folderId, String folderName) async {
+    final encodedQuery = Uri.encodeQueryComponent(
+      "'$folderId' in parents and trashed=false and mimeType contains 'video/'",
+    );
+    final url = Uri.parse(
+      'https://www.googleapis.com/drive/v3/files'
+      '?q=$encodedQuery'
+      '&fields=files(id,name,mimeType,size,modifiedTime)'
+      '&pageSize=1000'
+      '&supportsAllDrives=true'
+      '&includeItemsFromAllDrives=true',
+    );
+    final body = await _driveGet(url);
+    final files = body['files'] as List<Object?>? ?? const [];
+    final driveItems = files.cast<Map<String, Object?>>().map((file) {
+      final id = file['id']! as String;
+      return VideoItem(
+        id: 'drive:$id',
+        title: file['name'] as String? ?? 'Drive video',
+        uri: 'https://www.googleapis.com/drive/v3/files/$id?alt=media',
+        source: VideoSource.drive,
+      );
+    }).toList();
+
+    setState(() {
+      _videos.removeWhere((item) => item.source == VideoSource.drive);
+      _videos.addAll(driveItems);
+      _status = '$folderName 폴더에서 Drive 영상 ${driveItems.length}개 불러옴';
+    });
+  }
+
+  Future<Map<String, Object?>> _driveGet(Uri url) async {
+    final response = await http.get(
+      url,
+      headers: {'Authorization': 'Bearer $_accessToken'},
+    );
+
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      await _user!.authorizationClient.clearAuthorizationToken(
+        accessToken: _accessToken!,
+      );
+      await _setUser(_user!);
+      throw StateError('Drive 권한이 만료됐습니다. 다시 시도하세요.');
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw StateError('Drive 요청 실패 (${response.statusCode})');
+    }
+    return jsonDecode(response.body) as Map<String, Object?>;
   }
 
   Future<void> _playShuffled() async {
@@ -320,24 +360,11 @@ class _HomePageState extends State<HomePage> {
             _ActionGrid(
               busy: _busy || _initializing,
               onAddLocal: _addLocalVideos,
+              onAddDrive: _chooseDriveFolder,
               onPlay: _playShuffled,
               onPause: () => _invokePlayer('playPause'),
               onNext: () => _invokePlayer('next'),
               onStop: () => _invokePlayer('stop'),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _folderController,
-              decoration: InputDecoration(
-                labelText: 'Google Drive 폴더 ID',
-                hintText: 'drive.google.com/drive/folders/ 뒤의 값',
-                suffixIcon: IconButton(
-                  tooltip: 'Drive 영상 불러오기',
-                  onPressed: _busy ? null : _loadDriveFolder,
-                  icon: const Icon(Icons.cloud_sync_outlined),
-                ),
-              ),
-              onSubmitted: (_) => _loadDriveFolder(),
             ),
             const SizedBox(height: 16),
             Text(
@@ -352,6 +379,115 @@ class _HomePageState extends State<HomePage> {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _DriveFolderPicker extends StatefulWidget {
+  const _DriveFolderPicker({required this.loadFolders});
+
+  final Future<List<DriveFolder>> Function(String parentId) loadFolders;
+
+  @override
+  State<_DriveFolderPicker> createState() => _DriveFolderPickerState();
+}
+
+class _DriveFolderPickerState extends State<_DriveFolderPicker> {
+  final List<DriveFolder> _path = const [
+    DriveFolder(id: 'root', name: '내 드라이브'),
+  ].toList();
+  late Future<List<DriveFolder>> _folders = widget.loadFolders(_current.id);
+
+  DriveFolder get _current => _path.last;
+
+  void _open(DriveFolder folder) {
+    setState(() {
+      _path.add(folder);
+      _folders = widget.loadFolders(folder.id);
+    });
+  }
+
+  void _back() {
+    if (_path.length <= 1) return;
+    setState(() {
+      _path.removeLast();
+      _folders = widget.loadFolders(_current.id);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(_current.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      content: SizedBox(
+        width: double.maxFinite,
+        height: 420,
+        child: Column(
+          children: [
+            Row(
+              children: [
+                IconButton(
+                  tooltip: '상위 폴더',
+                  onPressed: _path.length > 1 ? _back : null,
+                  icon: const Icon(Icons.arrow_upward),
+                ),
+                Expanded(
+                  child: Text(
+                    _path.map((folder) => folder.name).join(' / '),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            const Divider(),
+            Expanded(
+              child: FutureBuilder<List<DriveFolder>>(
+                future: _folders,
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState != ConnectionState.done) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  if (snapshot.hasError) {
+                    return Center(child: Text(snapshot.error.toString()));
+                  }
+                  final folders = snapshot.data ?? const [];
+                  if (folders.isEmpty) {
+                    return const Center(child: Text('하위 폴더가 없습니다.'));
+                  }
+                  return ListView.builder(
+                    itemCount: folders.length,
+                    itemBuilder: (context, index) {
+                      final folder = folders[index];
+                      return ListTile(
+                        leading: const Icon(Icons.folder_outlined),
+                        title: Text(
+                          folder.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        trailing: const Icon(Icons.chevron_right),
+                        onTap: () => _open(folder),
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('취소'),
+        ),
+        FilledButton.icon(
+          onPressed: () => Navigator.pop(context, _current),
+          icon: const Icon(Icons.check),
+          label: const Text('이 폴더 선택'),
+        ),
+      ],
     );
   }
 }
@@ -405,6 +541,7 @@ class _ActionGrid extends StatelessWidget {
   const _ActionGrid({
     required this.busy,
     required this.onAddLocal,
+    required this.onAddDrive,
     required this.onPlay,
     required this.onPause,
     required this.onNext,
@@ -413,6 +550,7 @@ class _ActionGrid extends StatelessWidget {
 
   final bool busy;
   final VoidCallback onAddLocal;
+  final VoidCallback onAddDrive;
   final VoidCallback onPlay;
   final VoidCallback onPause;
   final VoidCallback onNext;
@@ -432,6 +570,11 @@ class _ActionGrid extends StatelessWidget {
           icon: Icons.video_library_outlined,
           label: '로컬',
           onPressed: busy ? null : onAddLocal,
+        ),
+        _ToolButton(
+          icon: Icons.cloud_outlined,
+          label: 'Drive',
+          onPressed: busy ? null : onAddDrive,
         ),
         _ToolButton(
           icon: Icons.shuffle,
