@@ -34,6 +34,10 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "pickLocalVideos" -> pickLocalVideos(result)
+                    "openPlayer" -> {
+                        openPlayer()
+                        result.success(null)
+                    }
                     "playQueue" -> withController(result) { controller ->
                         playQueue(call, controller)
                         result.success(null)
@@ -112,6 +116,10 @@ class MainActivity : FlutterActivity() {
             addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
         }
         startActivityForResult(intent, PICK_VIDEOS_REQUEST)
+    }
+
+    private fun openPlayer() {
+        startActivity(Intent(this, PlayerActivity::class.java))
     }
 
     private fun displayNameFor(uri: Uri): String {

@@ -213,9 +213,7 @@ class _HomePageState extends State<HomePage> {
 
       final added = _addUniqueVideos(picked);
       setState(() {
-        _status = added == 0
-            ? '이미 추가된 로컬 영상입니다.'
-            : '로컬 영상 $added개 추가됨';
+        _status = added == 0 ? '이미 추가된 로컬 영상입니다.' : '로컬 영상 $added개 추가됨';
       });
     });
   }
@@ -229,6 +227,7 @@ class _HomePageState extends State<HomePage> {
         context: context,
         builder: (context) => _DriveBrowserDialog(
           loadEntries: _listDriveEntries,
+          loadFolderTreeVideos: _collectDriveVideosRecursively,
         ),
       );
       if (result == null || result.items.isEmpty) return;
@@ -258,34 +257,68 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<List<DriveEntry>> _listDriveEntries(String parentId) async {
-    final query = Uri.encodeQueryComponent(
-      "'$parentId' in parents and trashed=false and "
-      "(mimeType='$_driveFolderMimeType' or mimeType contains 'video/')",
-    );
-    final url = Uri.parse(
-      'https://www.googleapis.com/drive/v3/files'
-      '?q=$query'
-      '&fields=files(id,name,mimeType,size,modifiedTime)'
-      '&orderBy=name'
-      '&pageSize=1000'
-      '&supportsAllDrives=true'
-      '&includeItemsFromAllDrives=true',
-    );
-    final body = await _driveGet(url);
-    final files = body['files'] as List<Object?>? ?? const [];
-    final entries = files.cast<Map<String, Object?>>().map((file) {
-      final mimeType = file['mimeType'] as String? ?? '';
-      return DriveEntry(
-        id: file['id']! as String,
-        name: file['name'] as String? ?? '이름 없음',
-        mimeType: mimeType,
-        type: mimeType == _driveFolderMimeType
-            ? DriveEntryType.folder
-            : DriveEntryType.video,
-        modifiedTime: DateTime.tryParse(file['modifiedTime'] as String? ?? ''),
-        size: int.tryParse(file['size'] as String? ?? ''),
+    final query =
+        "'$parentId' in parents and trashed=false and "
+        "(mimeType='$_driveFolderMimeType' or mimeType contains 'video/')";
+    return _listDriveEntriesByQuery(query);
+  }
+
+  Future<List<VideoItem>> _collectDriveVideosRecursively(String folderId) async {
+    final queue = <String>[folderId];
+    final videos = <VideoItem>[];
+
+    while (queue.isNotEmpty) {
+      final currentFolderId = queue.removeAt(0);
+      final entries = await _listDriveEntries(currentFolderId);
+      for (final entry in entries) {
+        if (entry.isFolder) {
+          queue.add(entry.id);
+        } else if (entry.isVideo) {
+          videos.add(entry.toVideoItem());
+        }
+      }
+    }
+
+    return videos;
+  }
+
+  Future<List<DriveEntry>> _listDriveEntriesByQuery(String query) async {
+    final entries = <DriveEntry>[];
+    String? pageToken;
+
+    do {
+      final queryParameters = <String, String>{
+        'q': query,
+        'fields': 'nextPageToken,files(id,name,mimeType,size,modifiedTime)',
+        'orderBy': 'name',
+        'pageSize': '1000',
+        'supportsAllDrives': 'true',
+        'includeItemsFromAllDrives': 'true',
+      };
+      if (pageToken != null) queryParameters['pageToken'] = pageToken;
+      final url = Uri.https(
+        'www.googleapis.com',
+        '/drive/v3/files',
+        queryParameters,
       );
-    }).toList();
+      final body = await _driveGet(url);
+      final files = body['files'] as List<Object?>? ?? const [];
+      entries.addAll(files.cast<Map<String, Object?>>().map((file) {
+        final mimeType = file['mimeType'] as String? ?? '';
+        return DriveEntry(
+          id: file['id']! as String,
+          name: file['name'] as String? ?? '이름 없음',
+          mimeType: mimeType,
+          type: mimeType == _driveFolderMimeType
+              ? DriveEntryType.folder
+              : DriveEntryType.video,
+          modifiedTime:
+              DateTime.tryParse(file['modifiedTime'] as String? ?? ''),
+          size: int.tryParse(file['size'] as String? ?? ''),
+        );
+      }));
+      pageToken = body['nextPageToken'] as String?;
+    } while (pageToken != null && pageToken.isNotEmpty);
 
     entries.sort((a, b) {
       if (a.type != b.type) return a.isFolder ? -1 : 1;
@@ -324,6 +357,7 @@ class _HomePageState extends State<HomePage> {
         'accessToken': _accessToken,
         'items': queue.map((item) => item.toPlaybackMap()).toList(),
       });
+      await _playback.invokeMethod('openPlayer');
       setState(() => _status = '셔플 재생 중: ${queue.first.title}');
     });
   }
@@ -393,6 +427,7 @@ class _HomePageState extends State<HomePage> {
               busy: _busy || _initializing,
               onAddLocal: _addLocalVideos,
               onAddDrive: _openDriveBrowser,
+              onOpenPlayer: () => _invokePlayer('openPlayer'),
               onPlay: _playShuffled,
               onPause: () => _invokePlayer('playPause'),
               onNext: () => _invokePlayer('next'),
@@ -416,9 +451,13 @@ class _HomePageState extends State<HomePage> {
 }
 
 class _DriveBrowserDialog extends StatefulWidget {
-  const _DriveBrowserDialog({required this.loadEntries});
+  const _DriveBrowserDialog({
+    required this.loadEntries,
+    required this.loadFolderTreeVideos,
+  });
 
   final Future<List<DriveEntry>> Function(String parentId) loadEntries;
+  final Future<List<VideoItem>> Function(String folderId) loadFolderTreeVideos;
 
   @override
   State<_DriveBrowserDialog> createState() => _DriveBrowserDialogState();
@@ -435,6 +474,8 @@ class _DriveBrowserDialogState extends State<_DriveBrowserDialog> {
   ].toList();
   late Future<List<DriveEntry>> _entries = widget.loadEntries(_current.id);
   List<DriveEntry> _visibleEntries = const [];
+  bool _collecting = false;
+  String _collectingName = '';
 
   DriveEntry get _current => _path.last;
 
@@ -465,91 +506,127 @@ class _DriveBrowserDialogState extends State<_DriveBrowserDialog> {
   void _selectVideo(DriveEntry entry) {
     Navigator.pop(
       context,
-      DriveImportResult(
-        items: [entry.toVideoItem()],
-        sourceName: entry.name,
-      ),
+      DriveImportResult(items: [entry.toVideoItem()], sourceName: entry.name),
     );
   }
 
-  void _addCurrentFolderVideos() {
-    final videos = _visibleEntries
-        .where((entry) => entry.isVideo)
-        .map((entry) => entry.toVideoItem())
-        .toList();
-    Navigator.pop(
-      context,
-      DriveImportResult(items: videos, sourceName: _current.name),
-    );
+  Future<void> _addFolderTree(DriveEntry folder) async {
+    setState(() {
+      _collecting = true;
+      _collectingName = folder.name;
+    });
+    try {
+      final videos = await widget.loadFolderTreeVideos(folder.id);
+      if (!mounted) return;
+      Navigator.pop(
+        context,
+        DriveImportResult(items: videos, sourceName: folder.name),
+      );
+    } catch (_) {
+      rethrow;
+    } finally {
+      if (mounted) setState(() => _collecting = false);
+    }
   }
+
+  Future<void> _addCurrentFolderTree() => _addFolderTree(_current);
 
   @override
   Widget build(BuildContext context) {
-    final videoCount = _visibleEntries.where((entry) => entry.isVideo).length;
+    final currentFolderVideos =
+        _visibleEntries.where((entry) => entry.isVideo).length;
 
     return AlertDialog(
       title: const Text('Google Drive에서 가져오기'),
       content: SizedBox(
         width: double.maxFinite,
-        height: 520,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        height: 540,
+        child: Stack(
           children: [
-            _DrivePathBar(
-              path: _path,
-              onGoUp: _path.length > 1 ? _goUp : null,
-              onRefresh: _refresh,
-            ),
-            const SizedBox(height: 8),
-            FilledButton.icon(
-              onPressed: videoCount > 0 ? _addCurrentFolderVideos : null,
-              icon: const Icon(Icons.playlist_add),
-              label: Text('현재 폴더 영상 추가 ($videoCount)'),
-            ),
-            const SizedBox(height: 8),
-            const Divider(height: 1),
-            Expanded(
-              child: FutureBuilder<List<DriveEntry>>(
-                future: _entries,
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState != ConnectionState.done) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
-                  if (snapshot.hasError) {
-                    return Center(child: Text(snapshot.error.toString()));
-                  }
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _DrivePathBar(
+                  path: _path,
+                  onGoUp: _path.length > 1 ? _goUp : null,
+                  onRefresh: _refresh,
+                ),
+                const SizedBox(height: 8),
+                FilledButton.icon(
+                  onPressed: _collecting ? null : _addCurrentFolderTree,
+                  icon: const Icon(Icons.playlist_add),
+                  label: Text(
+                    '이 폴더 전체 추가 ($currentFolderVideos개 표시됨)',
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Divider(height: 1),
+                Expanded(
+                  child: FutureBuilder<List<DriveEntry>>(
+                    future: _entries,
+                    builder: (context, snapshot) {
+                      if (snapshot.connectionState != ConnectionState.done) {
+                        return const Center(child: CircularProgressIndicator());
+                      }
+                      if (snapshot.hasError) {
+                        return Center(child: Text(snapshot.error.toString()));
+                      }
 
-                  final entries = snapshot.data ?? const [];
-                  _visibleEntries = entries;
-                  if (entries.isEmpty) {
-                    return const Center(
-                      child: Text('이 폴더에는 하위 폴더나 영상이 없습니다.'),
-                    );
-                  }
+                      final entries = snapshot.data ?? const [];
+                      _visibleEntries = entries;
+                      if (entries.isEmpty) {
+                        return const Center(
+                          child: Text('이 폴더에는 하위 폴더나 영상이 없습니다.'),
+                        );
+                      }
 
-                  return ListView.separated(
-                    itemCount: entries.length,
-                    separatorBuilder: (context, index) =>
-                        const Divider(height: 1),
-                    itemBuilder: (context, index) {
-                      final entry = entries[index];
-                      return _DriveEntryTile(
-                        entry: entry,
-                        onTap: entry.isFolder
-                            ? () => _openFolder(entry)
-                            : () => _selectVideo(entry),
+                      return ListView.separated(
+                        itemCount: entries.length,
+                        separatorBuilder: (context, index) =>
+                            const Divider(height: 1),
+                        itemBuilder: (context, index) {
+                          final entry = entries[index];
+                          return _DriveEntryTile(
+                            entry: entry,
+                            onTap: entry.isFolder
+                                ? () => _openFolder(entry)
+                                : () => _selectVideo(entry),
+                            onAddFolderTree: entry.isFolder && !_collecting
+                                ? () => _addFolderTree(entry)
+                                : null,
+                          );
+                        },
                       );
                     },
-                  );
-                },
-              ),
+                  ),
+                ),
+              ],
             ),
+            if (_collecting)
+              Positioned.fill(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.72),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const CircularProgressIndicator(),
+                        const SizedBox(height: 16),
+                        Text('$_collectingName 하위 폴더까지 수집 중...'),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
           ],
         ),
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.pop(context),
+          onPressed: _collecting ? null : () => Navigator.pop(context),
           child: const Text('닫기'),
         ),
       ],
@@ -600,10 +677,12 @@ class _DriveEntryTile extends StatelessWidget {
   const _DriveEntryTile({
     required this.entry,
     required this.onTap,
+    required this.onAddFolderTree,
   });
 
   final DriveEntry entry;
   final VoidCallback onTap;
+  final VoidCallback? onAddFolderTree;
 
   @override
   Widget build(BuildContext context) {
@@ -613,7 +692,19 @@ class _DriveEntryTile extends StatelessWidget {
       ),
       title: Text(entry.name, maxLines: 1, overflow: TextOverflow.ellipsis),
       subtitle: entry.isFolder ? const Text('폴더') : Text(_videoDescription(entry)),
-      trailing: Icon(entry.isFolder ? Icons.chevron_right : Icons.add_circle),
+      trailing: entry.isFolder
+          ? Wrap(
+              spacing: 2,
+              children: [
+                IconButton(
+                  tooltip: '하위 폴더까지 전체 추가',
+                  onPressed: onAddFolderTree,
+                  icon: const Icon(Icons.playlist_add),
+                ),
+                const Icon(Icons.chevron_right),
+              ],
+            )
+          : const Icon(Icons.add_circle),
       onTap: onTap,
     );
   }
@@ -669,10 +760,7 @@ class _StatusPanel extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            status,
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
+          Text(status, style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           Text(userEmail ?? 'Google 계정 연결 안 됨'),
           const SizedBox(height: 12),
@@ -695,6 +783,7 @@ class _ActionGrid extends StatelessWidget {
     required this.busy,
     required this.onAddLocal,
     required this.onAddDrive,
+    required this.onOpenPlayer,
     required this.onPlay,
     required this.onPause,
     required this.onNext,
@@ -704,6 +793,7 @@ class _ActionGrid extends StatelessWidget {
   final bool busy;
   final VoidCallback onAddLocal;
   final VoidCallback onAddDrive;
+  final VoidCallback onOpenPlayer;
   final VoidCallback onPlay;
   final VoidCallback onPause;
   final VoidCallback onNext;
@@ -728,6 +818,11 @@ class _ActionGrid extends StatelessWidget {
           icon: Icons.cloud_outlined,
           label: 'Drive',
           onPressed: busy ? null : onAddDrive,
+        ),
+        _ToolButton(
+          icon: Icons.fullscreen,
+          label: '플레이어',
+          onPressed: busy ? null : onOpenPlayer,
         ),
         _ToolButton(
           icon: Icons.shuffle,

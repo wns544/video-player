@@ -10,6 +10,6 @@ void main() {
     expect(find.text('Drive Shuffle'), findsOneWidget);
     expect(find.text('로컬'), findsOneWidget);
     expect(find.text('Drive'), findsOneWidget);
-    expect(find.text('아직 영상이 없습니다.', skipOffstage: false), findsOneWidget);
+    expect(find.text('플레이어'), findsOneWidget);
   });
 }
