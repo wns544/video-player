@@ -14,6 +14,8 @@ void main() {
 const _driveScopes = <String>[
   'https://www.googleapis.com/auth/drive.readonly',
 ];
+const _serverClientId =
+    '160619668600-gmrtfcj8gfv3q5t3qr3936qifj453ccb.apps.googleusercontent.com';
 
 class DriveShuffleApp extends StatelessWidget {
   const DriveShuffleApp({super.key});
@@ -94,7 +96,7 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _initializeGoogleSignIn() async {
     try {
-      await _signIn.initialize();
+      await _signIn.initialize(serverClientId: _serverClientId);
       _signIn.authenticationEvents.listen((event) async {
         switch (event) {
           case GoogleSignInAuthenticationEventSignIn(:final user):
