@@ -1,5 +1,7 @@
 package com.example.drive_shuffle_player
 
+import android.app.PendingIntent
+import android.content.Intent
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
@@ -12,6 +14,12 @@ import androidx.media3.session.MediaSessionService
 object PlaybackAuth {
     @Volatile
     var bearerToken: String? = null
+
+    @Volatile
+    var authError: Boolean = false
+
+    @Volatile
+    var lastHttpStatusCode: Int? = null
 }
 
 class PlaybackService : MediaSessionService() {
@@ -33,7 +41,19 @@ class PlaybackService : MediaSessionService() {
             .setMediaSourceFactory(mediaSourceFactory)
             .build()
 
-        mediaSession = MediaSession.Builder(this, player).build()
+        val playerIntent = Intent(this, PlayerActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val sessionActivity = PendingIntent.getActivity(
+            this,
+            0,
+            playerIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        mediaSession = MediaSession.Builder(this, player)
+            .setSessionActivity(sessionActivity)
+            .build()
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {

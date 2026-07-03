@@ -35,7 +35,9 @@
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|density|uiMode"
             android:exported="false"
             android:hardwareAccelerated="true"
+            android:resizeableActivity="true"
             android:screenOrientation="sensorLandscape"
+            android:supportsPictureInPicture="true"
             android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
         <service
             android:name=".PlaybackService"
