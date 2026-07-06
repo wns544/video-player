@@ -13,7 +13,10 @@ void main() {
   runApp(const DriveShuffleApp());
 }
 
-const _driveScopes = <String>['https://www.googleapis.com/auth/drive.readonly'];
+const _driveScopes = <String>[
+  'https://www.googleapis.com/auth/drive.readonly',
+  'https://www.googleapis.com/auth/drive.appdata',
+];
 const _serverClientId =
     '160619668600-gmrtfcj8gfv3q5t3qr3936qifj453ccb.apps.googleusercontent.com';
 const _driveFolderMimeType = 'application/vnd.google-apps.folder';
@@ -33,6 +36,7 @@ const _prefsPlaybackQueueStateKey = 'playback_queue_state';
 const _prefsLastGoogleEmailKey = 'last_google_email';
 const _prefsDriveAuthStateKey = 'drive_auth_state';
 const _driveImportConcurrency = 4;
+const _cloudPlaybackQueueFileName = 'cloud_playback_queue.json';
 
 final _themeChoiceNotifier = ValueNotifier(AppThemeChoice.light);
 
@@ -610,7 +614,7 @@ class PlaybackStateSummary {
       ? null
       : queue[currentIndex];
 
-  Map<String, Object?> toQueueStateJson() {
+  Map<String, Object?> toQueueStateJson({DateTime? updatedAt}) {
     final safeIndex = queue.isEmpty
         ? 0
         : currentIndex.clamp(0, queue.length - 1).toInt();
@@ -621,7 +625,7 @@ class PlaybackStateSummary {
       'positionMs': positionMs,
       'durationMs': durationMs,
       'isPlaying': isPlaying,
-      'updatedAt': DateTime.now().toIso8601String(),
+      'updatedAt': (updatedAt ?? DateTime.now()).toIso8601String(),
     };
   }
 
@@ -759,9 +763,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Timer? _playbackSyncTimer;
   DateTime? _lastPlaybackStatePersistAt;
   DateTime? _lastDriveReconnectPromptAt;
+  DateTime? _lastLocalPlaybackQueueUpdatedAt;
   String? _lastPersistedPlaybackMediaId;
   int? _lastPersistedPlaybackPositionMs;
   String? _lastPersistedPlaybackQueueSignature;
+  String? _cloudQueueFileId;
+  String? _lastUploadedCloudQueueSignature;
   String? _visibleVideosCacheKey;
   List<VideoItem>? _visibleVideosCache;
 
@@ -783,6 +790,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _resumePlayback = true;
   bool _searchActive = false;
   bool _refreshingDriveToken = false;
+  bool _syncingCloudQueue = false;
   String? _lastGoogleEmail;
   bool _driveAuthExpired = false;
   bool _initializing = true;
@@ -928,8 +936,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             decoded,
             _videos,
           );
+          _lastLocalPlaybackQueueUpdatedAt = DateTime.tryParse(
+            decoded['updatedAt'] as String? ?? '',
+          );
         } catch (_) {
           _playbackSummary = null;
+          _lastLocalPlaybackQueueUpdatedAt = null;
         }
       }
     });
@@ -961,7 +973,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } else {
       await prefs.setString(
         _prefsPlaybackQueueStateKey,
-        jsonEncode(playbackSummary.toQueueStateJson()),
+        jsonEncode(
+          playbackSummary.toQueueStateJson(
+            updatedAt: _lastLocalPlaybackQueueUpdatedAt,
+          ),
+        ),
       );
     }
     if (_lastGoogleEmail == null || _lastGoogleEmail!.isEmpty) {
@@ -1005,10 +1021,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final libraryIndex = _videos.indexWhere((item) => item.id == mediaId);
       final summary = _playbackSummary;
       final libraryById = {for (final item in _videos) item.id: item};
+      final shouldKeepSavedMultiQueue =
+          queueIds != null &&
+          queueIds.length <= 1 &&
+          summary != null &&
+          summary.queue.length > 1;
+      final effectiveQueueIds = shouldKeepSavedMultiQueue
+          ? summary.queue.map((item) => item.id).toList(growable: false)
+          : queueIds;
       final shouldPersist = _shouldPersistPlaybackSnapshot(
         mediaId,
         savedPositionMs,
-        queueIds: queueIds,
+        queueIds: effectiveQueueIds,
         forcePersist: forcePersist,
       );
       if (!mounted) return;
@@ -1023,12 +1047,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           );
           _invalidateVisibleVideos();
         }
-        final shouldKeepSavedMultiQueue =
-            queueIds != null &&
-            queueIds.length == 1 &&
-            summary != null &&
-            summary.queue.length > 1 &&
-            summary.queue.any((item) => item.id == mediaId);
         final syncedQueue =
             queueIds == null || queueIds.isEmpty || shouldKeepSavedMultiQueue
             ? summary?.queue
@@ -1042,23 +1060,34 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           );
           final resolvedIndex = queueIndex >= 0
               ? queueIndex
+              : shouldKeepSavedMultiQueue
+              ? summary.currentIndex.clamp(0, syncedQueue.length - 1)
               : nativeIndex.clamp(0, syncedQueue.length - 1);
+          final resolvedPositionMs =
+              queueIndex >= 0 || !shouldKeepSavedMultiQueue
+              ? savedPositionMs
+              : summary.positionMs;
+          final resolvedDurationMs =
+              queueIndex >= 0 || !shouldKeepSavedMultiQueue
+              ? durationMs
+              : summary.durationMs;
           _playbackSummary = PlaybackStateSummary(
             queue: syncedQueue,
             currentIndex: resolvedIndex,
             isPlaying: isPlaying,
-            positionMs: savedPositionMs,
-            durationMs: durationMs,
+            positionMs: resolvedPositionMs,
+            durationMs: resolvedDurationMs,
           );
         }
       });
       if (shouldPersist) {
-        await _saveLibraryState();
         _rememberPersistedPlaybackSnapshot(
           mediaId,
           savedPositionMs,
-          queueIds: queueIds,
+          queueIds: effectiveQueueIds,
         );
+        await _saveLibraryState();
+        unawaited(_syncPlaybackQueueToDrive());
       }
     } catch (_) {
       // Sync is opportunistic; playback controls still work if the session is gone.
@@ -1094,10 +1123,227 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     int positionMs, {
     List<String>? queueIds,
   }) {
+    _lastLocalPlaybackQueueUpdatedAt = DateTime.now();
     _lastPersistedPlaybackMediaId = mediaId;
     _lastPersistedPlaybackPositionMs = positionMs;
     _lastPersistedPlaybackQueueSignature = queueIds?.join('\u001f');
     _lastPlaybackStatePersistAt = DateTime.now();
+  }
+
+  void _rememberPlaybackQueueChanged() {
+    _lastLocalPlaybackQueueUpdatedAt = DateTime.now();
+  }
+
+  Future<void> _syncPlaybackQueueFromDrive() async {
+    if (_syncingCloudQueue || _accessToken == null || _accessToken!.isEmpty) {
+      return;
+    }
+    _syncingCloudQueue = true;
+    try {
+      final fileId = await _findCloudPlaybackQueueFileId();
+      if (fileId == null) return;
+      _cloudQueueFileId = fileId;
+      final response = await _driveRequestWithAuth((token) {
+        return http
+            .get(
+              Uri.https(
+                'www.googleapis.com',
+                '/drive/v3/files/$fileId',
+                {'alt': 'media'},
+              ),
+              headers: {'Authorization': 'Bearer $token'},
+            )
+            .timeout(const Duration(seconds: 12));
+      });
+      if (response.statusCode < 200 || response.statusCode >= 300) return;
+      final cloud = Map<String, Object?>.from(jsonDecode(response.body) as Map);
+      final cloudUpdatedAt = DateTime.tryParse(
+        cloud['updatedAt'] as String? ?? '',
+      );
+      final localUpdatedAt = _lastLocalPlaybackQueueUpdatedAt;
+      if (cloudUpdatedAt == null ||
+          (localUpdatedAt != null && !cloudUpdatedAt.isAfter(localUpdatedAt))) {
+        return;
+      }
+      final queueItems = (cloud['queueItems'] as List? ?? const [])
+          .whereType<Map>()
+          .map((item) => VideoItem.fromJson(Map<String, Object?>.from(item)))
+          .where((item) => item.source == VideoSource.drive)
+          .toList(growable: false);
+      if (queueItems.isNotEmpty && mounted) {
+        setState(() {
+          final knownIds = _videos.map((item) => item.id).toSet();
+          _videos.addAll(queueItems.where((item) => knownIds.add(item.id)));
+        });
+      }
+      final queueState = Map<String, Object?>.from(
+        cloud['queueState'] as Map? ?? const {},
+      );
+      final restored = PlaybackStateSummary.fromQueueStateJson(
+        queueState,
+        _videos,
+      );
+      if (!mounted) return;
+      setState(() {
+        _playbackSummary = restored;
+        _lastLocalPlaybackQueueUpdatedAt = cloudUpdatedAt;
+        _status = restored?.current == null
+            ? _status
+            : t.playing(restored!.current!.title);
+      });
+      await _saveLibraryState();
+      _lastUploadedCloudQueueSignature = _cloudQueueSignature();
+    } catch (_) {
+      // Queue sync is opportunistic; local playback remains the source of truth.
+    } finally {
+      _syncingCloudQueue = false;
+    }
+  }
+
+  Future<void> _syncPlaybackQueueToDrive({bool allowEmpty = false}) async {
+    if (_syncingCloudQueue || _accessToken == null || _accessToken!.isEmpty) {
+      return;
+    }
+    final summary = _playbackSummary;
+    if ((summary == null || summary.queue.isEmpty) && !allowEmpty) return;
+    final signature = _cloudQueueSignature();
+    if (signature == _lastUploadedCloudQueueSignature) return;
+    _syncingCloudQueue = true;
+    try {
+      final now = _lastLocalPlaybackQueueUpdatedAt ?? DateTime.now();
+      final queueState = summary?.toQueueStateJson(updatedAt: now);
+      final payload = <String, Object?>{
+        'schemaVersion': 1,
+        'updatedAt': now.toIso8601String(),
+        'accountEmail': _user?.email,
+        'queueState': queueState,
+        'queueItems':
+            summary?.queue
+                .where((item) => item.source == VideoSource.drive)
+                .map((item) => item.toJson())
+                .toList(growable: false) ??
+            const [],
+      };
+      final body = jsonEncode(payload);
+      final fileId = _cloudQueueFileId ?? await _findCloudPlaybackQueueFileId();
+      if (fileId == null) {
+        _cloudQueueFileId = await _createCloudPlaybackQueueFile(body);
+      } else {
+        _cloudQueueFileId = fileId;
+        await _updateCloudPlaybackQueueFile(fileId, body);
+      }
+      _lastUploadedCloudQueueSignature = signature;
+    } catch (_) {
+      // Sync failures should never interrupt playback.
+    } finally {
+      _syncingCloudQueue = false;
+    }
+  }
+
+  String _cloudQueueSignature() {
+    final summary = _playbackSummary;
+    if (summary == null || summary.queue.isEmpty) {
+      return 'empty:${_lastLocalPlaybackQueueUpdatedAt?.toIso8601String()}';
+    }
+    return [
+      _lastLocalPlaybackQueueUpdatedAt?.toIso8601String() ?? '',
+      summary.currentIndex,
+      summary.positionMs,
+      summary.isPlaying,
+      ...summary.queue.map((item) => item.id),
+    ].join('\u001f');
+  }
+
+  Future<String?> _findCloudPlaybackQueueFileId() async {
+    final query =
+        "name='$_cloudPlaybackQueueFileName' and "
+        "'appDataFolder' in parents and trashed=false";
+    final url = Uri.https('www.googleapis.com', '/drive/v3/files', {
+      'spaces': 'appDataFolder',
+      'q': query,
+      'pageSize': '1',
+      'fields': 'files(id,name,modifiedTime)',
+    });
+    final response = await _driveRequestWithAuth((token) {
+      return http
+          .get(url, headers: {'Authorization': 'Bearer $token'})
+          .timeout(const Duration(seconds: 12));
+    });
+    if (response.statusCode < 200 || response.statusCode >= 300) return null;
+    final body = jsonDecode(response.body) as Map<String, Object?>;
+    final files = body['files'] as List? ?? const [];
+    if (files.isEmpty) return null;
+    return (files.first as Map)['id'] as String?;
+  }
+
+  Future<String?> _createCloudPlaybackQueueFile(String body) async {
+    final boundary = 'cloudQueue${DateTime.now().microsecondsSinceEpoch}';
+    final metadata = jsonEncode({
+      'name': _cloudPlaybackQueueFileName,
+      'parents': ['appDataFolder'],
+    });
+    final multipartBody =
+        '--$boundary\r\n'
+        'Content-Type: application/json; charset=UTF-8\r\n\r\n'
+        '$metadata\r\n'
+        '--$boundary\r\n'
+        'Content-Type: application/json; charset=UTF-8\r\n\r\n'
+        '$body\r\n'
+        '--$boundary--';
+    final response = await _driveRequestWithAuth((token) {
+      return http
+          .post(
+            Uri.https('www.googleapis.com', '/upload/drive/v3/files', {
+              'uploadType': 'multipart',
+              'fields': 'id',
+            }),
+            headers: {
+              'Authorization': 'Bearer $token',
+              'Content-Type': 'multipart/related; boundary=$boundary',
+            },
+            body: multipartBody,
+          )
+          .timeout(const Duration(seconds: 12));
+    });
+    if (response.statusCode < 200 || response.statusCode >= 300) return null;
+    final json = jsonDecode(response.body) as Map<String, Object?>;
+    return json['id'] as String?;
+  }
+
+  Future<void> _updateCloudPlaybackQueueFile(String fileId, String body) async {
+    await _driveRequestWithAuth((token) {
+      return http
+          .patch(
+            Uri.https('www.googleapis.com', '/upload/drive/v3/files/$fileId', {
+              'uploadType': 'media',
+            }),
+            headers: {
+              'Authorization': 'Bearer $token',
+              'Content-Type': 'application/json; charset=UTF-8',
+            },
+            body: body,
+          )
+          .timeout(const Duration(seconds: 12));
+    });
+  }
+
+  Future<http.Response> _driveRequestWithAuth(
+    Future<http.Response> Function(String token) request,
+  ) async {
+    var token = _accessToken;
+    if (token == null || token.isEmpty) {
+      throw StateError(t.drivePermissionExpired);
+    }
+    var response = await request(token);
+    if (response.statusCode != 401 && response.statusCode != 403) {
+      return response;
+    }
+    final refreshed = await _refreshDriveAccessTokenSilently(
+      clearCurrentToken: true,
+    );
+    token = _accessToken;
+    if (!refreshed || token == null || token.isEmpty) return response;
+    return request(token);
   }
 
   void _invalidateVisibleVideos() {
@@ -1173,12 +1419,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _user = user;
         _lastGoogleEmail = user.email;
         _accessToken = token;
+        _cloudQueueFileId = null;
+        _lastUploadedCloudQueueSignature = null;
         _driveAuthExpired = token == null;
         _status = token == null
             ? t.drivePermissionRequired
             : t.connectedAccount(user.email);
       });
       await _saveLibraryState();
+      if (token != null && token.isNotEmpty) {
+        unawaited(_syncPlaybackQueueFromDrive());
+      }
       return;
     }
     await _authorizeDriveForUser(user, promptIfNecessary: true);
@@ -1197,12 +1448,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _user = user;
       _lastGoogleEmail = user.email;
       _accessToken = authorization?.replaceFirst('Bearer ', '');
+      _cloudQueueFileId = null;
+      _lastUploadedCloudQueueSignature = null;
       _driveAuthExpired = authorization == null;
       _status = authorization == null
           ? t.drivePermissionRequired
           : t.connectedAccount(user.email);
     });
     await _saveLibraryState();
+    if (authorization != null && authorization.isNotEmpty) {
+      unawaited(_syncPlaybackQueueFromDrive());
+    }
   }
 
   Future<void> _openDriveBrowser() async {
@@ -1793,12 +2049,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         );
         _status = t.playing(current.title);
       });
-      await _saveLibraryState();
       _rememberPersistedPlaybackSnapshot(
         current.id,
         current.lastPositionMs,
         queueIds: queue.map((item) => item.id).toList(growable: false),
       );
+      await _saveLibraryState();
+      unawaited(_syncPlaybackQueueToDrive());
       if ((count ?? queue.length) > 0) {
         await _playback.invokeMethod('openPlayer');
       }
@@ -1863,7 +2120,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
       _status = t.playing(current.title);
     });
+    _rememberPlaybackQueueChanged();
     await _saveLibraryState();
+    unawaited(_syncPlaybackQueueToDrive());
     return true;
   }
 
@@ -1928,7 +2187,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           isPlaying: summary.isPlaying,
         );
       });
+      _rememberPlaybackQueueChanged();
       await _saveLibraryState();
+      unawaited(_syncPlaybackQueueToDrive());
     });
   }
 
@@ -1940,7 +2201,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _playbackSummary = null;
         _status = t.playbackStopped;
       });
+      _rememberPlaybackQueueChanged();
       await _saveLibraryState();
+      unawaited(_syncPlaybackQueueToDrive(allowEmpty: true));
     });
   }
 
