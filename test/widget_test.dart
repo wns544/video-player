@@ -7,7 +7,7 @@ void main() {
     await tester.pumpWidget(const DriveShuffleApp());
     await tester.pump(const Duration(seconds: 1));
 
-    expect(find.text('Drive Shuffle'), findsOneWidget);
+    expect(find.text('클라우드플레이어'), findsOneWidget);
     expect(find.text('\uC804\uCCB4'), findsWidgets);
     expect(find.text('Drive'), findsWidgets);
     expect(find.text('\uC7AC\uC0DD \uBAA9\uB85D'), findsOneWidget);

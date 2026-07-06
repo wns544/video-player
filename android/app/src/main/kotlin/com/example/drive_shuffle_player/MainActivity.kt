@@ -288,13 +288,18 @@ class MainActivity : FlutterActivity() {
 
     private fun playbackState(controller: MediaController): Map<String, Any?> {
         val duration = controller.duration.takeIf { it >= 0 } ?: 0L
+        val queueIds = (0 until controller.mediaItemCount).map { index ->
+            controller.getMediaItemAt(index).mediaId
+        }
         return mapOf(
             "mediaId" to controller.currentMediaItem?.mediaId,
+            "queueIds" to queueIds,
             "currentIndex" to controller.currentMediaItemIndex,
             "positionMs" to controller.currentPosition.coerceAtLeast(0L),
             "durationMs" to duration,
             "isPlaying" to controller.isPlaying,
             "mediaItemCount" to controller.mediaItemCount,
+            "repeatMode" to controller.repeatMode,
             "playbackState" to controller.playbackState,
             "authError" to PlaybackAuth.authError,
             "httpStatusCode" to PlaybackAuth.lastHttpStatusCode,

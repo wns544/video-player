@@ -23,25 +23,44 @@ const _prefsRecentIdsKey = 'recent_video_ids';
 const _prefsTabKey = 'library_tab';
 const _prefsSortKey = 'sort_mode';
 const _prefsViewModeKey = 'view_mode';
+const _prefsPortraitViewModeKey = 'portrait_view_mode';
+const _prefsLandscapeViewModeKey = 'landscape_view_mode';
 const _prefsResumePlaybackKey = 'resume_playback';
+const _prefsTabBarPlacementKey = 'tab_bar_placement';
 const _prefsLanguageKey = 'app_language';
+const _prefsThemeKey = 'app_theme';
+const _prefsPlaybackQueueStateKey = 'playback_queue_state';
 const _prefsLastGoogleEmailKey = 'last_google_email';
 const _prefsDriveAuthStateKey = 'drive_auth_state';
 const _driveImportConcurrency = 4;
 
+final _themeChoiceNotifier = ValueNotifier(AppThemeChoice.light);
+
 class _Ui {
-  static const bg = Color(0xffF5F5F7);
-  static const card = Color(0xffFFFFFF);
-  static const surface2 = Color(0xffEFEFEF);
-  static const text = Color(0xff1C1C1E);
-  static const text2 = Color(0xff6C6C70);
-  static const text3 = Color(0xffAEAEB2);
+  static AppThemeChoice themeChoice = AppThemeChoice.light;
+
+  static bool get isDark => themeChoice == AppThemeChoice.dark;
+
+  static Color get bg =>
+      isDark ? const Color(0xff101113) : const Color(0xffF5F5F7);
+  static Color get card =>
+      isDark ? const Color(0xff1A1B1F) : const Color(0xffFFFFFF);
+  static Color get surface2 =>
+      isDark ? const Color(0xff25272C) : const Color(0xffEFEFEF);
+  static Color get text =>
+      isDark ? const Color(0xffF4F4F6) : const Color(0xff1C1C1E);
+  static Color get text2 =>
+      isDark ? const Color(0xffB7B8BE) : const Color(0xff6C6C70);
+  static Color get text3 =>
+      isDark ? const Color(0xff777A82) : const Color(0xffAEAEB2);
   static const accent = Color(0xff32BF5E);
   static const accentDark = Color(0xff25A34A);
   static const red = Color(0xffFF3B30);
   static const yellow = Color(0xffFF9500);
-  static const border = Color(0x14000000);
-  static const accentDim = Color(0x1A32BF5E);
+  static Color get border =>
+      isDark ? const Color(0x22FFFFFF) : const Color(0x14000000);
+  static Color get accentDim =>
+      isDark ? const Color(0x2632BF5E) : const Color(0x1A32BF5E);
 }
 
 class DriveShuffleApp extends StatelessWidget {
@@ -49,102 +68,113 @@ class DriveShuffleApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'Drive Shuffle',
-      theme: ThemeData(
-        useMaterial3: false,
-        scaffoldBackgroundColor: _Ui.bg,
-        fontFamily: 'Inter',
-        primaryColor: _Ui.accent,
-        colorScheme: const ColorScheme.light(
-          primary: _Ui.accent,
-          secondary: _Ui.accentDark,
-          surface: _Ui.card,
-          error: _Ui.red,
-          onPrimary: Colors.white,
-          onSurface: _Ui.text,
-          onError: Colors.white,
-        ),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: _Ui.bg,
-          foregroundColor: _Ui.text,
-          elevation: 0,
-          centerTitle: false,
-          titleTextStyle: TextStyle(
-            color: _Ui.text,
-            fontSize: 22,
-            fontWeight: FontWeight.w800,
-            letterSpacing: -0.5,
+    return ValueListenableBuilder<AppThemeChoice>(
+      valueListenable: _themeChoiceNotifier,
+      builder: (context, themeChoice, _) {
+        _Ui.themeChoice = themeChoice;
+        return MaterialApp(
+          debugShowCheckedModeBanner: false,
+          title: '클라우드플레이어',
+          theme: ThemeData(
+            useMaterial3: false,
+            brightness: _Ui.isDark ? Brightness.dark : Brightness.light,
+            scaffoldBackgroundColor: _Ui.bg,
+            fontFamily: 'Inter',
+            primaryColor: _Ui.accent,
+            colorScheme: ColorScheme(
+              brightness: _Ui.isDark ? Brightness.dark : Brightness.light,
+              primary: _Ui.accent,
+              secondary: _Ui.accentDark,
+              tertiary: _Ui.accent,
+              surface: _Ui.card,
+              error: _Ui.red,
+              onPrimary: Colors.white,
+              onSecondary: Colors.white,
+              onTertiary: Colors.white,
+              onSurface: _Ui.text,
+              onError: Colors.white,
+            ),
+            appBarTheme: AppBarTheme(
+              backgroundColor: _Ui.bg,
+              foregroundColor: _Ui.text,
+              elevation: 0,
+              centerTitle: false,
+              titleTextStyle: TextStyle(
+                color: _Ui.text,
+                fontSize: 22,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.5,
+              ),
+              iconTheme: IconThemeData(color: _Ui.text),
+            ),
+            dividerTheme: DividerThemeData(
+              color: _Ui.border,
+              thickness: 1,
+              space: 1,
+            ),
+            inputDecorationTheme: InputDecorationTheme(
+              filled: true,
+              fillColor: _Ui.surface2,
+              isDense: true,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide.none,
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide.none,
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: const BorderSide(color: _Ui.accent),
+              ),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 10,
+              ),
+              hintStyle: TextStyle(color: _Ui.text3, fontSize: 13),
+            ),
+            textTheme: TextTheme(
+              headlineSmall: TextStyle(
+                color: _Ui.text,
+                fontSize: 22,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.6,
+              ),
+              titleMedium: TextStyle(
+                color: _Ui.text,
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+                letterSpacing: -0.2,
+              ),
+              titleSmall: TextStyle(
+                color: _Ui.text,
+                fontSize: 13.5,
+                fontWeight: FontWeight.w700,
+                letterSpacing: -0.2,
+              ),
+              bodyMedium: TextStyle(color: _Ui.text2, fontSize: 13),
+              bodySmall: TextStyle(color: _Ui.text2, fontSize: 11),
+              labelLarge: TextStyle(
+                color: _Ui.text,
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+              ),
+              labelMedium: TextStyle(
+                color: _Ui.text2,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+              labelSmall: TextStyle(
+                color: _Ui.text2,
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           ),
-          iconTheme: IconThemeData(color: _Ui.text),
-        ),
-        dividerTheme: const DividerThemeData(
-          color: _Ui.border,
-          thickness: 1,
-          space: 1,
-        ),
-        inputDecorationTheme: InputDecorationTheme(
-          filled: true,
-          fillColor: _Ui.surface2,
-          isDense: true,
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(8),
-            borderSide: BorderSide.none,
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(8),
-            borderSide: BorderSide.none,
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(8),
-            borderSide: const BorderSide(color: _Ui.accent),
-          ),
-          contentPadding: const EdgeInsets.symmetric(
-            horizontal: 12,
-            vertical: 10,
-          ),
-          hintStyle: const TextStyle(color: _Ui.text3, fontSize: 13),
-        ),
-        textTheme: const TextTheme(
-          headlineSmall: TextStyle(
-            color: _Ui.text,
-            fontSize: 22,
-            fontWeight: FontWeight.w800,
-            letterSpacing: -0.6,
-          ),
-          titleMedium: TextStyle(
-            color: _Ui.text,
-            fontSize: 14,
-            fontWeight: FontWeight.w700,
-            letterSpacing: -0.2,
-          ),
-          titleSmall: TextStyle(
-            color: _Ui.text,
-            fontSize: 13.5,
-            fontWeight: FontWeight.w700,
-            letterSpacing: -0.2,
-          ),
-          bodyMedium: TextStyle(color: _Ui.text2, fontSize: 13),
-          bodySmall: TextStyle(color: _Ui.text2, fontSize: 11),
-          labelLarge: TextStyle(
-            color: _Ui.text,
-            fontSize: 13,
-            fontWeight: FontWeight.w700,
-          ),
-          labelMedium: TextStyle(
-            color: _Ui.text2,
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-          ),
-          labelSmall: TextStyle(
-            color: _Ui.text2,
-            fontSize: 10,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ),
-      home: const HomePage(),
+          home: const HomePage(),
+        );
+      },
     );
   }
 }
@@ -162,7 +192,11 @@ enum VideoSortMode {
   duration,
 }
 
-enum LibraryViewMode { list, grouped }
+enum LibraryViewMode { list, grid, grouped }
+
+enum TabBarPlacement { automatic, bottom, landscapeLeft, landscapeRight }
+
+enum AppThemeChoice { light, dark }
 
 enum AppLanguage { ko, en }
 
@@ -176,6 +210,26 @@ class AppStrings {
   String get languageName => isKo ? '\uD55C\uAD6D\uC5B4' : 'English';
   String get settings => isKo ? '\uC124\uC815' : 'Settings';
   String get languageSetting => isKo ? '\uC5B8\uC5B4' : 'Language';
+  String get themeSetting => isKo ? '\uD14C\uB9C8' : 'Theme';
+  String get lightTheme => isKo ? '\uB77C\uC774\uD2B8' : 'Light';
+  String get darkTheme => isKo ? '\uB2E4\uD06C' : 'Dark';
+  String get tabBarPlacement =>
+      isKo ? '\uD0ED\uBC14 \uC704\uCE58' : 'Tab bar position';
+  String get tabBarAutomatic => isKo ? '\uC790\uB3D9' : 'Automatic';
+  String get tabBarBottom =>
+      isKo ? '\uD56D\uC0C1 \uD558\uB2E8' : 'Always bottom';
+  String get tabBarLandscapeLeft =>
+      isKo ? '\uAC00\uB85C\uBAA8\uB4DC \uC67C\uCABD' : 'Landscape left';
+  String get tabBarLandscapeRight =>
+      isKo ? '\uAC00\uB85C\uBAA8\uB4DC \uC624\uB978\uCABD' : 'Landscape right';
+  String get portraitViewMode => isKo
+      ? '\uC138\uB85C\uBAA8\uB4DC \uBAA9\uB85D \uBCF4\uAE30'
+      : 'Portrait view';
+  String get landscapeViewMode => isKo
+      ? '\uAC00\uB85C\uBAA8\uB4DC \uBAA9\uB85D \uBCF4\uAE30'
+      : 'Landscape view';
+  String get listViewMode => isKo ? '\uAC00\uB85C \uBAA9\uB85D' : 'List';
+  String get gridViewMode => isKo ? '\uADF8\uB9AC\uB4DC' : 'Grid';
   String get resumePlayback =>
       isKo ? '\uC774\uC5B4\uBCF4\uAE30 \uC0AC\uC6A9' : 'Resume playback';
   String get resumePlaybackDescription => isKo
@@ -228,6 +282,8 @@ class AppStrings {
       : 'No videos to play in $tab.';
   String get searchVideos =>
       isKo ? '\uC601\uC0C1 \uAC80\uC0C9' : 'Search videos';
+  String get playInOrder =>
+      isKo ? '\uC21C\uC11C\uB300\uB85C \uC7AC\uC0DD' : 'Play in order';
   String get shufflePlay => isKo ? '\uC154\uD50C \uC7AC\uC0DD' : 'Shuffle play';
   String get importFromDrive =>
       isKo ? 'Drive\uC5D0\uC11C \uAC00\uC838\uC624\uAE30' : 'Import from Drive';
@@ -263,6 +319,14 @@ class AppStrings {
   String get noVideoPlaying => isKo
       ? '\uC7AC\uC0DD \uC911\uC778 \uC601\uC0C1\uC774 \uC5C6\uC2B5\uB2C8\uB2E4'
       : 'No video is playing';
+  String get currentQueue => isKo ? '\uD604\uC7AC \uD050' : 'Current queue';
+  String get queueEmpty => isKo
+      ? '\uD604\uC7AC \uD050\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4'
+      : 'Queue is empty';
+  String get nowPlaying =>
+      isKo ? '\uD604\uC7AC \uC7AC\uC0DD \uC911' : 'Now playing';
+  String get tapToPlay =>
+      isKo ? '\uD0ED\uD574\uC11C \uC7AC\uC0DD' : 'Tap to play';
   String get videoFile => isKo ? '\uC601\uC0C1 \uD30C\uC77C' : 'Video file';
   String get myVideos => isKo ? '\uB0B4 \uC601\uC0C1' : 'My videos';
   String get all => isKo ? '\uC804\uCCB4' : 'All';
@@ -545,6 +609,53 @@ class PlaybackStateSummary {
       queue.isEmpty || currentIndex < 0 || currentIndex >= queue.length
       ? null
       : queue[currentIndex];
+
+  Map<String, Object?> toQueueStateJson() {
+    final safeIndex = queue.isEmpty
+        ? 0
+        : currentIndex.clamp(0, queue.length - 1).toInt();
+    return {
+      'queueIds': queue.map((item) => item.id).toList(growable: false),
+      'currentIndex': safeIndex,
+      'currentVideoId': queue.isEmpty ? null : queue[safeIndex].id,
+      'positionMs': positionMs,
+      'durationMs': durationMs,
+      'isPlaying': isPlaying,
+      'updatedAt': DateTime.now().toIso8601String(),
+    };
+  }
+
+  static PlaybackStateSummary? fromQueueStateJson(
+    Map<String, Object?> json,
+    List<VideoItem> library,
+  ) {
+    final queueIds = (json['queueIds'] as List?)?.whereType<String>().toList(
+      growable: false,
+    );
+    if (queueIds == null || queueIds.isEmpty) return null;
+    final libraryById = {for (final item in library) item.id: item};
+    final queue = queueIds
+        .map((id) => libraryById[id])
+        .whereType<VideoItem>()
+        .toList(growable: false);
+    if (queue.isEmpty) return null;
+
+    final currentVideoId = json['currentVideoId'] as String?;
+    final savedIndex = (json['currentIndex'] as num?)?.toInt() ?? 0;
+    final currentIndexFromId = currentVideoId == null
+        ? -1
+        : queue.indexWhere((item) => item.id == currentVideoId);
+    final currentIndex = currentIndexFromId >= 0
+        ? currentIndexFromId
+        : savedIndex.clamp(0, queue.length - 1).toInt();
+    return PlaybackStateSummary(
+      queue: queue,
+      currentIndex: currentIndex,
+      isPlaying: json['isPlaying'] as bool? ?? false,
+      positionMs: (json['positionMs'] as num?)?.toInt() ?? 0,
+      durationMs: (json['durationMs'] as num?)?.toInt() ?? 0,
+    );
+  }
 }
 
 enum DriveEntryType { folder, video }
@@ -600,6 +711,7 @@ class DriveImportResult {
     required this.sourceName,
     required this.foldersScanned,
     required this.videosFound,
+    required this.createPlaylist,
   });
 
   factory DriveImportResult.singleVideo(DriveEntry entry) {
@@ -608,6 +720,7 @@ class DriveImportResult {
       sourceName: entry.name,
       foldersScanned: 0,
       videosFound: 1,
+      createPlaylist: false,
     );
   }
 
@@ -615,6 +728,7 @@ class DriveImportResult {
   final String sourceName;
   final int foldersScanned;
   final int videosFound;
+  final bool createPlaylist;
 }
 
 class DriveImportProgress {
@@ -647,6 +761,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   DateTime? _lastDriveReconnectPromptAt;
   String? _lastPersistedPlaybackMediaId;
   int? _lastPersistedPlaybackPositionMs;
+  String? _lastPersistedPlaybackQueueSignature;
   String? _visibleVideosCacheKey;
   List<VideoItem>? _visibleVideosCache;
 
@@ -660,8 +775,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   LibraryTab _selectedTab = LibraryTab.all;
   String? _selectedPlaylistId;
   VideoSortMode _sortMode = VideoSortMode.recentlyAdded;
-  LibraryViewMode _viewMode = LibraryViewMode.list;
+  LibraryViewMode _portraitViewMode = LibraryViewMode.list;
+  LibraryViewMode _landscapeViewMode = LibraryViewMode.grid;
+  TabBarPlacement _tabBarPlacement = TabBarPlacement.automatic;
   AppLanguage _language = AppLanguage.ko;
+  AppThemeChoice _themeChoice = AppThemeChoice.light;
   bool _resumePlayback = true;
   bool _searchActive = false;
   bool _refreshingDriveToken = false;
@@ -670,7 +788,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _initializing = true;
   bool _busy = false;
   String _query = '';
-  String _status = 'Drive Shuffle Player';
+  String _status = '클라우드플레이어';
 
   AppStrings get t => AppStrings(_language);
   static const _playbackPersistInterval = Duration(seconds: 10);
@@ -738,7 +856,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final recentIds = prefs.getStringList(_prefsRecentIdsKey) ?? const [];
     final tabName = prefs.getString(_prefsTabKey);
     final sortName = prefs.getString(_prefsSortKey);
+    final legacyViewModeName = prefs.getString(_prefsViewModeKey);
+    final portraitViewModeName = prefs.getString(_prefsPortraitViewModeKey);
+    final landscapeViewModeName = prefs.getString(_prefsLandscapeViewModeKey);
+    final tabBarPlacementName = prefs.getString(_prefsTabBarPlacementKey);
     final languageName = prefs.getString(_prefsLanguageKey);
+    final themeName = prefs.getString(_prefsThemeKey);
+    final playbackQueueJson = prefs.getString(_prefsPlaybackQueueStateKey);
     final lastGoogleEmail = prefs.getString(_prefsLastGoogleEmailKey);
     final driveAuthState = prefs.getString(_prefsDriveAuthStateKey);
     final resumePlayback = prefs.getBool(_prefsResumePlaybackKey) ?? true;
@@ -771,14 +895,43 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         (mode) => mode.name == sortName,
         orElse: () => VideoSortMode.recentlyAdded,
       );
-      _viewMode = LibraryViewMode.list;
+      _portraitViewMode = LibraryViewMode.values.firstWhere(
+        (mode) => mode.name == (portraitViewModeName ?? legacyViewModeName),
+        orElse: () => LibraryViewMode.list,
+      );
+      _landscapeViewMode = LibraryViewMode.values.firstWhere(
+        (mode) => mode.name == landscapeViewModeName,
+        orElse: () => LibraryViewMode.grid,
+      );
+      _tabBarPlacement = TabBarPlacement.values.firstWhere(
+        (placement) => placement.name == tabBarPlacementName,
+        orElse: () => TabBarPlacement.automatic,
+      );
       _language = AppLanguage.values.firstWhere(
         (language) => language.name == languageName,
         orElse: () => AppLanguage.ko,
       );
+      _themeChoice = AppThemeChoice.values.firstWhere(
+        (choice) => choice.name == themeName,
+        orElse: () => AppThemeChoice.light,
+      );
+      _themeChoiceNotifier.value = _themeChoice;
       _lastGoogleEmail = lastGoogleEmail;
       _driveAuthExpired = driveAuthState == 'expired';
       _resumePlayback = resumePlayback;
+      if (playbackQueueJson != null && playbackQueueJson.isNotEmpty) {
+        try {
+          final decoded = Map<String, Object?>.from(
+            jsonDecode(playbackQueueJson) as Map,
+          );
+          _playbackSummary = PlaybackStateSummary.fromQueueStateJson(
+            decoded,
+            _videos,
+          );
+        } catch (_) {
+          _playbackSummary = null;
+        }
+      }
     });
   }
 
@@ -796,8 +949,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await prefs.setStringList(_prefsRecentIdsKey, _recentIds);
     await prefs.setString(_prefsTabKey, _selectedTab.name);
     await prefs.setString(_prefsSortKey, _sortMode.name);
-    await prefs.setString(_prefsViewModeKey, _viewMode.name);
+    await prefs.setString(_prefsViewModeKey, _portraitViewMode.name);
+    await prefs.setString(_prefsPortraitViewModeKey, _portraitViewMode.name);
+    await prefs.setString(_prefsLandscapeViewModeKey, _landscapeViewMode.name);
+    await prefs.setString(_prefsTabBarPlacementKey, _tabBarPlacement.name);
     await prefs.setString(_prefsLanguageKey, _language.name);
+    await prefs.setString(_prefsThemeKey, _themeChoice.name);
+    final playbackSummary = _playbackSummary;
+    if (playbackSummary == null || playbackSummary.queue.isEmpty) {
+      await prefs.remove(_prefsPlaybackQueueStateKey);
+    } else {
+      await prefs.setString(
+        _prefsPlaybackQueueStateKey,
+        jsonEncode(playbackSummary.toQueueStateJson()),
+      );
+    }
     if (_lastGoogleEmail == null || _lastGoogleEmail!.isEmpty) {
       await prefs.remove(_prefsLastGoogleEmailKey);
     } else {
@@ -818,6 +984,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
       if (state == null) return;
       final mediaId = state['mediaId'] as String?;
+      final queueIds = (state['queueIds'] as List?)?.whereType<String>().toList(
+        growable: false,
+      );
       final mediaItemCount = (state['mediaItemCount'] as num?)?.toInt() ?? 0;
       final authError = state['authError'] as bool? ?? false;
       if (authError) {
@@ -835,9 +1004,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
       final libraryIndex = _videos.indexWhere((item) => item.id == mediaId);
       final summary = _playbackSummary;
+      final libraryById = {for (final item in _videos) item.id: item};
       final shouldPersist = _shouldPersistPlaybackSnapshot(
         mediaId,
         savedPositionMs,
+        queueIds: queueIds,
         forcePersist: forcePersist,
       );
       if (!mounted) return;
@@ -852,15 +1023,28 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           );
           _invalidateVisibleVideos();
         }
-        if (summary != null && summary.queue.isNotEmpty) {
-          final queueIndex = summary.queue.indexWhere(
+        final shouldKeepSavedMultiQueue =
+            queueIds != null &&
+            queueIds.length == 1 &&
+            summary != null &&
+            summary.queue.length > 1 &&
+            summary.queue.any((item) => item.id == mediaId);
+        final syncedQueue =
+            queueIds == null || queueIds.isEmpty || shouldKeepSavedMultiQueue
+            ? summary?.queue
+            : queueIds
+                  .map((id) => libraryById[id])
+                  .whereType<VideoItem>()
+                  .toList(growable: false);
+        if (syncedQueue != null && syncedQueue.isNotEmpty) {
+          final queueIndex = syncedQueue.indexWhere(
             (item) => item.id == mediaId,
           );
           final resolvedIndex = queueIndex >= 0
               ? queueIndex
-              : nativeIndex.clamp(0, summary.queue.length - 1);
+              : nativeIndex.clamp(0, syncedQueue.length - 1);
           _playbackSummary = PlaybackStateSummary(
-            queue: summary.queue,
+            queue: syncedQueue,
             currentIndex: resolvedIndex,
             isPlaying: isPlaying,
             positionMs: savedPositionMs,
@@ -870,7 +1054,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       });
       if (shouldPersist) {
         await _saveLibraryState();
-        _rememberPersistedPlaybackSnapshot(mediaId, savedPositionMs);
+        _rememberPersistedPlaybackSnapshot(
+          mediaId,
+          savedPositionMs,
+          queueIds: queueIds,
+        );
       }
     } catch (_) {
       // Sync is opportunistic; playback controls still work if the session is gone.
@@ -880,10 +1068,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _shouldPersistPlaybackSnapshot(
     String mediaId,
     int positionMs, {
+    List<String>? queueIds,
     required bool forcePersist,
   }) {
     if (forcePersist) return true;
     if (_lastPersistedPlaybackMediaId != mediaId) return true;
+    final queueSignature = queueIds?.join('\u001f');
+    if (queueSignature != null &&
+        queueSignature != _lastPersistedPlaybackQueueSignature) {
+      return true;
+    }
     final lastPosition = _lastPersistedPlaybackPositionMs;
     final lastPersistedAt = _lastPlaybackStatePersistAt;
     if (lastPosition == null || lastPersistedAt == null) return true;
@@ -895,9 +1089,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return movedEnough && waitedEnough;
   }
 
-  void _rememberPersistedPlaybackSnapshot(String mediaId, int positionMs) {
+  void _rememberPersistedPlaybackSnapshot(
+    String mediaId,
+    int positionMs, {
+    List<String>? queueIds,
+  }) {
     _lastPersistedPlaybackMediaId = mediaId;
     _lastPersistedPlaybackPositionMs = positionMs;
+    _lastPersistedPlaybackQueueSignature = queueIds?.join('\u001f');
     _lastPlaybackStatePersistAt = DateTime.now();
   }
 
@@ -1023,28 +1222,36 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final addedItems = _addUniqueVideos(result.items);
       final added = addedItems.length;
       final duplicates = result.videosFound - added;
-      if (addedItems.isNotEmpty) {
-        _createPlaylistFromItems(
+      VideoPlaylist? createdPlaylist;
+      final playlistItems = _uniqueItemsForPlaylist(result.items);
+      if (result.createPlaylist && playlistItems.isNotEmpty) {
+        createdPlaylist = _createPlaylistFromItems(
           name: result.sourceName.isNotEmpty
               ? result.sourceName
               : _importPlaylistName(t.driveImport),
           sourceLabel: 'Google Drive',
-          items: addedItems,
+          items: playlistItems,
         );
       }
       await _saveLibraryState();
       setState(() {
-        _selectedTab = LibraryTab.drive;
+        if (createdPlaylist != null) {
+          _selectedTab = LibraryTab.playlist;
+          _selectedPlaylistId = createdPlaylist.id;
+        } else {
+          _selectedTab = LibraryTab.drive;
+        }
         if (result.videosFound == 0) {
           _status = "${result.sourceName}: no videos found in this folder.";
         } else if (added == 0) {
           _status =
-              "${result.sourceName}: no new videos; skipped ${duplicates.clamp(0, result.videosFound)} duplicates";
+              "${result.sourceName}: no new videos; skipped ${duplicates.clamp(0, result.videosFound)} duplicates"
+              "${createdPlaylist != null ? "; playlist created" : ""}";
         } else {
           _status =
               "${result.sourceName}: added $added videos; found ${result.videosFound}"
               "${duplicates > 0 ? "; skipped duplicates" : ""}"
-              "${result.foldersScanned > 0 ? "; scanned folders" : ""}";
+              "${result.foldersScanned > 0 ? "; playlist created" : ""}";
         }
       });
       unawaited(_hydrateDriveThumbnails(addedItems));
@@ -1056,6 +1263,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final uniqueItems = items.where((item) => knownIds.add(item.id)).toList();
     setState(() => _videos.addAll(uniqueItems));
     return uniqueItems;
+  }
+
+  List<VideoItem> _uniqueItemsForPlaylist(List<VideoItem> items) {
+    final knownLibraryIds = _videos.map((item) => item.id).toSet();
+    final seenPlaylistIds = <String>{};
+    return items
+        .where(
+          (item) =>
+              knownLibraryIds.contains(item.id) && seenPlaylistIds.add(item.id),
+        )
+        .toList();
   }
 
   String _importPlaylistName(String label) {
@@ -1188,9 +1406,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (_refreshingDriveToken) return;
     _refreshingDriveToken = true;
     try {
-      final refreshed = await _refreshDriveAccessTokenSilently(
-        clearCurrentToken: true,
-      );
+      final refreshed = await _refreshDriveAccessTokenSilently();
       final token = _accessToken;
       if (!refreshed || token == null || token.isEmpty) {
         _showDriveReconnectMessageIfNeeded();
@@ -1319,6 +1535,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       sourceName: sourceName,
       foldersScanned: foldersScanned,
       videosFound: videos.length,
+      createPlaylist: true,
     );
   }
 
@@ -1499,6 +1716,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await _startPlayback(queue, startIndex: 0);
   }
 
+  Future<void> _playVisibleInOrder() async {
+    final items = _visibleVideos();
+    if (items.isEmpty) {
+      _showMessage(t.noVideosIn(_tabLabel(_selectedTab)));
+      return;
+    }
+    await _startPlayback(items, startIndex: 0);
+  }
+
   Future<void> _playFromItem(VideoItem item) async {
     final queue = _visibleVideos();
     final index = queue.indexWhere((candidate) => candidate.id == item.id);
@@ -1519,6 +1745,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _playLastVideo() async {
+    final summary = _playbackSummary;
+    if (summary != null && summary.queue.isNotEmpty) {
+      await _startPlayback(
+        summary.queue,
+        startIndex: summary.currentIndex,
+        startPositionMs: _resumePlayback ? summary.positionMs : 0,
+      );
+      return;
+    }
     final item = _lastPlaybackCandidate;
     if (item == null) {
       _showMessage(t.noVideoPlaying);
@@ -1530,6 +1765,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _startPlayback(
     List<VideoItem> queue, {
     required int startIndex,
+    int? startPositionMs,
   }) async {
     await _guarded(() async {
       if (queue.isEmpty) {
@@ -1542,7 +1778,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         'accessToken': _accessToken,
         'items': queue.map((item) => item.toPlaybackMap()).toList(),
         'startIndex': normalizedIndex,
-        'startPositionMs': _resumeStartPositionFor(queue[normalizedIndex]),
+        'startPositionMs':
+            startPositionMs ?? _resumeStartPositionFor(queue[normalizedIndex]),
       });
       final current = queue[normalizedIndex];
       _markPlayed(current);
@@ -1557,6 +1794,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _status = t.playing(current.title);
       });
       await _saveLibraryState();
+      _rememberPersistedPlaybackSnapshot(
+        current.id,
+        current.lastPositionMs,
+        queueIds: queue.map((item) => item.id).toList(growable: false),
+      );
       if ((count ?? queue.length) > 0) {
         await _playback.invokeMethod('openPlayer');
       }
@@ -1587,12 +1829,51 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+  Future<bool?> _restoreNativeQueueIfNeeded() async {
+    final summary = _playbackSummary;
+    if (summary == null || summary.queue.isEmpty) return null;
+    try {
+      final state = await _playback.invokeMapMethod<String, Object?>(
+        'getPlaybackState',
+      );
+      final mediaItemCount = (state?['mediaItemCount'] as num?)?.toInt() ?? 0;
+      if (mediaItemCount > 0) return false;
+    } catch (_) {
+      // If the native session is gone, try to recreate it from saved state.
+    }
+    if (!await _ensurePlaybackReadyFor(summary.queue)) return null;
+    final currentIndex = summary.currentIndex
+        .clamp(0, summary.queue.length - 1)
+        .toInt();
+    await _playback.invokeMethod<int>('playQueue', {
+      'accessToken': _accessToken,
+      'items': summary.queue.map((item) => item.toPlaybackMap()).toList(),
+      'startIndex': currentIndex,
+      'startPositionMs': _resumePlayback ? summary.positionMs : 0,
+    });
+    final current = summary.queue[currentIndex];
+    _markPlayed(current);
+    setState(() {
+      _playbackSummary = PlaybackStateSummary(
+        queue: summary.queue,
+        currentIndex: currentIndex,
+        isPlaying: true,
+        positionMs: _resumePlayback ? summary.positionMs : 0,
+        durationMs: summary.durationMs,
+      );
+      _status = t.playing(current.title);
+    });
+    await _saveLibraryState();
+    return true;
+  }
+
   Future<void> _openPlayerFromMini() async {
     await _guarded(() async {
       if (_playbackSummary?.current == null) {
         _showMessage(t.noVideosToPlay);
         return;
       }
+      if (await _restoreNativeQueueIfNeeded() == null) return;
       await _playback.invokeMethod('openPlayer');
     });
   }
@@ -1603,6 +1884,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _showMessage(t.noVideosToPlay);
         return;
       }
+      final restored = await _restoreNativeQueueIfNeeded();
+      if (restored == null) return;
+      if (restored) return;
       await _playback.invokeMethod('playPause');
       setState(() {
         final summary = _playbackSummary!;
@@ -1619,12 +1903,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _next() async {
     await _guarded(() async {
+      if (_playbackSummary == null || _playbackSummary!.queue.isEmpty) {
+        _showMessage(t.noVideosToPlay);
+        return;
+      }
+      if (await _restoreNativeQueueIfNeeded() == null) return;
+      await _syncPlaybackState(forcePersist: true);
       final summary = _playbackSummary;
       if (summary == null || summary.queue.isEmpty) {
         _showMessage(t.noVideosToPlay);
         return;
       }
-      await _syncPlaybackState(forcePersist: true);
       if (summary.queue.any((item) => item.source == VideoSource.drive)) {
         await _refreshDriveAccessTokenSilently();
         await _updateNativeAccessToken();
@@ -1651,7 +1940,67 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _playbackSummary = null;
         _status = t.playbackStopped;
       });
+      await _saveLibraryState();
     });
+  }
+
+  Future<void> _showCurrentQueue() async {
+    await _syncPlaybackState();
+    final summary = _playbackSummary;
+    if (!mounted) return;
+    if (summary == null || summary.queue.isEmpty) {
+      _showMessage(t.queueEmpty);
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        return SafeArea(
+          child: ListView.separated(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            itemCount: summary.queue.length + 1,
+            separatorBuilder: (context, index) => const Divider(height: 1),
+            itemBuilder: (context, index) {
+              if (index == 0) {
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    '${t.currentQueue} · ${summary.queue.length}',
+                    style: TextStyle(
+                      color: _Ui.text,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                );
+              }
+              final itemIndex = index - 1;
+              final item = summary.queue[itemIndex];
+              final current = itemIndex == summary.currentIndex;
+              return ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(
+                  current ? Icons.play_arrow : Icons.video_file_outlined,
+                  color: current ? _Ui.accent : _Ui.text3,
+                ),
+                title: Text(
+                  item.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: Text(current ? t.nowPlaying : t.tapToPlay),
+                onTap: () async {
+                  Navigator.pop(context);
+                  await _startPlayback(summary.queue, startIndex: itemIndex);
+                },
+              );
+            },
+          ),
+        );
+      },
+    );
   }
 
   void _toggleFavorite(VideoItem item) {
@@ -1981,84 +2330,165 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _openSettings() async {
-    await showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setSheetState) {
-            return SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      t.settings,
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                    const SizedBox(height: 8),
-                    DropdownButtonFormField<AppLanguage>(
-                      initialValue: _language,
-                      decoration: InputDecoration(labelText: t.languageSetting),
-                      items: [
-                        DropdownMenuItem(
-                          value: AppLanguage.ko,
-                          child: Text(AppStrings(AppLanguage.ko).languageName),
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (context) {
+          return StatefulBuilder(
+            builder: (context, setPageState) {
+              return Scaffold(
+                appBar: AppBar(title: Text(t.settings)),
+                body: SafeArea(
+                  child: ListView(
+                    padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+                    children: [
+                      DropdownButtonFormField<AppLanguage>(
+                        initialValue: _language,
+                        decoration: InputDecoration(
+                          labelText: t.languageSetting,
                         ),
-                        DropdownMenuItem(
-                          value: AppLanguage.en,
-                          child: Text(AppStrings(AppLanguage.en).languageName),
+                        items: [
+                          DropdownMenuItem(
+                            value: AppLanguage.ko,
+                            child: Text(
+                              AppStrings(AppLanguage.ko).languageName,
+                            ),
+                          ),
+                          DropdownMenuItem(
+                            value: AppLanguage.en,
+                            child: Text(
+                              AppStrings(AppLanguage.en).languageName,
+                            ),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setState(() => _language = value);
+                          setPageState(() {});
+                          unawaited(_saveLibraryState());
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      DropdownButtonFormField<AppThemeChoice>(
+                        initialValue: _themeChoice,
+                        decoration: InputDecoration(labelText: t.themeSetting),
+                        items: [
+                          DropdownMenuItem(
+                            value: AppThemeChoice.light,
+                            child: Text(t.lightTheme),
+                          ),
+                          DropdownMenuItem(
+                            value: AppThemeChoice.dark,
+                            child: Text(t.darkTheme),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setState(() => _themeChoice = value);
+                          _themeChoiceNotifier.value = value;
+                          setPageState(() {});
+                          unawaited(_saveLibraryState());
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      DropdownButtonFormField<TabBarPlacement>(
+                        initialValue: _tabBarPlacement,
+                        decoration: InputDecoration(
+                          labelText: t.tabBarPlacement,
                         ),
-                      ],
-                      onChanged: (value) {
-                        if (value == null) return;
-                        setState(() => _language = value);
-                        setSheetState(() {});
-                        unawaited(_saveLibraryState());
-                      },
-                    ),
-                    const SizedBox(height: 8),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: Text(t.resumePlayback),
-                      subtitle: Text(t.resumePlaybackDescription),
-                      value: _resumePlayback,
-                      onChanged: (value) {
-                        setState(() => _resumePlayback = value);
-                        setSheetState(() {});
-                        unawaited(_saveLibraryState());
-                      },
-                    ),
-                    const Divider(),
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: const Icon(Icons.restart_alt),
-                      title: Text(t.clearResumePositions),
-                      subtitle: Text(t.clearResumePositionsDescription),
-                      onTap: () {
-                        Navigator.pop(context);
-                        _clearResumePositions();
-                      },
-                    ),
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: const Icon(Icons.delete_sweep_outlined),
-                      title: Text(t.clearLibrary),
-                      subtitle: Text(t.clearLibraryDescription),
-                      onTap: () {
-                        Navigator.pop(context);
-                        _clearPlaylist();
-                      },
-                    ),
-                  ],
+                        items: [
+                          DropdownMenuItem(
+                            value: TabBarPlacement.automatic,
+                            child: Text(t.tabBarAutomatic),
+                          ),
+                          DropdownMenuItem(
+                            value: TabBarPlacement.bottom,
+                            child: Text(t.tabBarBottom),
+                          ),
+                          DropdownMenuItem(
+                            value: TabBarPlacement.landscapeLeft,
+                            child: Text(t.tabBarLandscapeLeft),
+                          ),
+                          DropdownMenuItem(
+                            value: TabBarPlacement.landscapeRight,
+                            child: Text(t.tabBarLandscapeRight),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setState(() => _tabBarPlacement = value);
+                          setPageState(() {});
+                          unawaited(_saveLibraryState());
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      DropdownButtonFormField<LibraryViewMode>(
+                        initialValue: _portraitViewMode,
+                        decoration: InputDecoration(
+                          labelText: t.portraitViewMode,
+                        ),
+                        items: _viewModeMenuItems(),
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setState(() => _portraitViewMode = value);
+                          setPageState(() {});
+                          unawaited(_saveLibraryState());
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      DropdownButtonFormField<LibraryViewMode>(
+                        initialValue: _landscapeViewMode,
+                        decoration: InputDecoration(
+                          labelText: t.landscapeViewMode,
+                        ),
+                        items: _viewModeMenuItems(),
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setState(() => _landscapeViewMode = value);
+                          setPageState(() {});
+                          unawaited(_saveLibraryState());
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(t.resumePlayback),
+                        subtitle: Text(t.resumePlaybackDescription),
+                        value: _resumePlayback,
+                        onChanged: (value) {
+                          setState(() => _resumePlayback = value);
+                          setPageState(() {});
+                          unawaited(_saveLibraryState());
+                        },
+                      ),
+                      const Divider(),
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.restart_alt),
+                        title: Text(t.clearResumePositions),
+                        subtitle: Text(t.clearResumePositionsDescription),
+                        onTap: () {
+                          Navigator.pop(context);
+                          _clearResumePositions();
+                        },
+                      ),
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.delete_sweep_outlined),
+                        title: Text(t.clearLibrary),
+                        subtitle: Text(t.clearLibraryDescription),
+                        onTap: () {
+                          Navigator.pop(context);
+                          _clearPlaylist();
+                        },
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            );
-          },
-        );
-      },
+              );
+            },
+          );
+        },
+      ),
     );
   }
 
@@ -2104,43 +2534,53 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   ),
                 ),
                 const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(
-                      child: FilledButton.icon(
-                        onPressed: _busy
-                            ? null
-                            : () {
-                                Navigator.pop(context);
-                                _signInWithGoogle();
-                              },
-                        icon: const Icon(Icons.link),
-                        label: Text(t.reconnect),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: _busy
-                            ? null
-                            : () {
-                                Navigator.pop(context);
-                                _switchGoogleAccount();
-                              },
-                        icon: const Icon(Icons.switch_account_outlined),
-                        label: Text(t.switchAccount),
-                      ),
-                    ),
-                  ],
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: _busy
+                        ? null
+                        : () {
+                            Navigator.pop(context);
+                            _signInWithGoogle();
+                          },
+                    icon: const Icon(Icons.link),
+                    label: Text(t.reconnect),
+                  ),
                 ),
                 const SizedBox(height: 8),
-                TextButton.icon(
-                  onPressed: () {
-                    Navigator.pop(context);
-                    _openSettings();
-                  },
-                  icon: const Icon(Icons.settings_outlined),
-                  label: Text(t.settings),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 12,
+                      ),
+                    ),
+                    onPressed: _busy
+                        ? null
+                        : () {
+                            Navigator.pop(context);
+                            _switchGoogleAccount();
+                          },
+                    icon: const Icon(Icons.switch_account_outlined),
+                    label: Text(t.switchAccount),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    onPressed: () {
+                      Navigator.pop(context);
+                      _openSettings();
+                    },
+                    icon: const Icon(Icons.settings_outlined),
+                    label: Text(t.settings),
+                  ),
                 ),
               ],
             ),
@@ -2317,8 +2757,28 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  bool _handleMainBack({
+    required bool selecting,
+    required bool showingPlaylistDetail,
+  }) {
+    if (selecting) {
+      _clearSelection();
+      return true;
+    }
+    if (_searchActive) {
+      _closeSearch();
+      return true;
+    }
+    if (showingPlaylistDetail) {
+      setState(() => _selectedPlaylistId = null);
+      return true;
+    }
+    return false;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final mediaQuery = MediaQuery.of(context);
     final visibleVideos = _visibleVideos();
     final selecting = _selectedIds.isNotEmpty;
     final lastVideo = _lastPlaybackCandidate;
@@ -2326,11 +2786,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final showingPlaylistDetail =
         _selectedTab == LibraryTab.playlist && selectedPlaylist != null;
 
+    final hasInternalBackTarget =
+        selecting || _searchActive || showingPlaylistDetail;
+    final tabSide = _resolvedSideTabSide(mediaQuery);
+    final useSideTabs = tabSide != null;
+    final resolvedViewMode = _resolvedViewMode(mediaQuery);
+
     return PopScope(
-      canPop: !_searchActive,
+      canPop: !hasInternalBackTarget,
       onPopInvokedWithResult: (didPop, result) {
-        if (!didPop && _searchActive) {
-          _closeSearch();
+        if (!didPop) {
+          _handleMainBack(
+            selecting: selecting,
+            showingPlaylistDetail: showingPlaylistDetail,
+          );
         }
       },
       child: Scaffold(
@@ -2362,7 +2831,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       ? t.selectedCount(_selectedIds.length)
                       : showingPlaylistDetail
                       ? selectedPlaylist.name
-                      : 'Drive Shuffle',
+                      : '클라우드플레이어',
                 ),
           actions: selecting
               ? [
@@ -2416,113 +2885,224 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ],
         ),
         body: SafeArea(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final compact = constraints.maxHeight < 520;
-              return Column(
-                children: [
-                  Expanded(
-                    child: CustomScrollView(
-                      slivers: [
-                        SliverPersistentHeader(
-                          pinned: true,
-                          delegate: _LibraryHeaderDelegate(
-                            compact: compact,
-                            childBuilder: (context, shrinkProgress) =>
-                                _LibraryHeader(
-                                  status: _status,
-                                  driveAuthExpired: _driveAuthExpired,
-                                  selectedTab: _selectedTab,
+          child: Row(
+            children: [
+              if (tabSide == _SideTabSide.left)
+                _SideTabs(
+                  side: _SideTabSide.left,
+                  selectedIndex: _selectedTab.index,
+                  tabs: LibraryTab.values,
+                  labelFor: _tabLabel,
+                  onSelected: _busy ? null : _selectTab,
+                ),
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final compact = constraints.maxHeight < 520;
+                    final collapseHeaderOnScroll = compact && useSideTabs;
+                    final useFloatingMini = compact && useSideTabs;
+                    final hasMini =
+                        _playbackSummary?.current != null || lastVideo != null;
+                    final content = Column(
+                      children: [
+                        Expanded(
+                          child: CustomScrollView(
+                            slivers: [
+                              SliverPersistentHeader(
+                                pinned: !collapseHeaderOnScroll,
+                                floating: collapseHeaderOnScroll,
+                                delegate: _LibraryHeaderDelegate(
                                   compact: compact,
-                                  strings: t,
-                                  tabLabel: showingPlaylistDetail
-                                      ? selectedPlaylist.name
-                                      : _tabLabel(_selectedTab),
-                                  onAddDrive: _openDriveBrowser,
-                                  onShuffle: visibleVideos.isEmpty || _busy
-                                      ? null
-                                      : _playVisibleShuffled,
-                                  onCreatePlaylist: _busy
-                                      ? null
-                                      : _createEmptyPlaylist,
+                                  childBuilder: (context, shrinkProgress) =>
+                                      _LibraryHeader(
+                                        status: _status,
+                                        driveAuthExpired: _driveAuthExpired,
+                                        selectedTab: _selectedTab,
+                                        compact: compact,
+                                        strings: t,
+                                        tabLabel: showingPlaylistDetail
+                                            ? selectedPlaylist.name
+                                            : _tabLabel(_selectedTab),
+                                        onAddDrive: _openDriveBrowser,
+                                        onPlayInOrder:
+                                            visibleVideos.isEmpty || _busy
+                                            ? null
+                                            : _playVisibleInOrder,
+                                        onShuffle:
+                                            visibleVideos.isEmpty || _busy
+                                            ? null
+                                            : _playVisibleShuffled,
+                                        onCreatePlaylist: _busy
+                                            ? null
+                                            : _createEmptyPlaylist,
+                                      ),
                                 ),
+                              ),
+                              if (_selectedTab == LibraryTab.playlist &&
+                                  selectedPlaylist == null)
+                                _PlaylistSliverList(
+                                  playlists: _playlists,
+                                  strings: t,
+                                  coverFor: _coverForPlaylist,
+                                  countFor: (playlist) =>
+                                      _videosForPlaylist(playlist).length,
+                                  onOpen: (playlist) => setState(
+                                    () => _selectedPlaylistId = playlist.id,
+                                  ),
+                                  onPlay: _playPlaylist,
+                                  onRename: _renamePlaylist,
+                                  onDelete: _deletePlaylist,
+                                  onCreate: _createEmptyPlaylist,
+                                )
+                              else
+                                _VideoSliverList(
+                                  tab: _selectedTab,
+                                  videos: visibleVideos,
+                                  busy: _busy,
+                                  selectedIds: _selectedIds,
+                                  viewMode: resolvedViewMode,
+                                  strings: t,
+                                  onPlay: _playFromItem,
+                                  onToggleSelection: _toggleSelection,
+                                  onToggleFavorite: _toggleFavorite,
+                                  onRemove: showingPlaylistDetail
+                                      ? _removeFromSelectedPlaylist
+                                      : _removeVideo,
+                                  removeLabel: showingPlaylistDetail
+                                      ? t.removeFromPlaylist
+                                      : t.removeFromList,
+                                ),
+                            ],
                           ),
                         ),
-                        if (_selectedTab == LibraryTab.playlist &&
-                            selectedPlaylist == null)
-                          _PlaylistSliverList(
-                            playlists: _playlists,
-                            strings: t,
-                            coverFor: _coverForPlaylist,
-                            countFor: (playlist) =>
-                                _videosForPlaylist(playlist).length,
-                            onOpen: (playlist) => setState(
-                              () => _selectedPlaylistId = playlist.id,
-                            ),
-                            onPlay: _playPlaylist,
-                            onRename: _renamePlaylist,
-                            onDelete: _deletePlaylist,
-                            onCreate: _createEmptyPlaylist,
-                          )
-                        else
-                          _VideoSliverList(
-                            tab: _selectedTab,
-                            videos: visibleVideos,
-                            busy: _busy,
-                            selectedIds: _selectedIds,
-                            viewMode: LibraryViewMode.list,
-                            strings: t,
-                            onPlay: _playFromItem,
-                            onToggleSelection: _toggleSelection,
-                            onToggleFavorite: _toggleFavorite,
-                            onRemove: showingPlaylistDetail
-                                ? _removeFromSelectedPlaylist
-                                : _removeVideo,
-                            removeLabel: showingPlaylistDetail
-                                ? t.removeFromPlaylist
-                                : t.removeFromList,
-                          ),
+                        if (_playbackSummary?.current != null ||
+                            lastVideo != null)
+                          !compact
+                              ? _MiniPlayer(
+                                  item: _playbackSummary?.current ?? lastVideo!,
+                                  showLivePreview:
+                                      _playbackSummary?.current != null,
+                                  isPlaying:
+                                      _playbackSummary?.isPlaying ?? false,
+                                  positionMs:
+                                      _playbackSummary?.positionMs ??
+                                      (lastVideo?.lastPositionMs ?? 0),
+                                  durationMs:
+                                      _playbackSummary?.durationMs ??
+                                      (lastVideo?.duration ?? 0),
+                                  strings: t,
+                                  onOpen: _playbackSummary?.current == null
+                                      ? _playLastVideo
+                                      : _openPlayerFromMini,
+                                  onPlayPause: _playbackSummary?.current == null
+                                      ? _playLastVideo
+                                      : _playPause,
+                                  onNext: _playbackSummary?.current == null
+                                      ? null
+                                      : _next,
+                                  onQueue: _playbackSummary?.current == null
+                                      ? null
+                                      : _showCurrentQueue,
+                                  onStop: _playbackSummary?.current == null
+                                      ? null
+                                      : _stop,
+                                )
+                              : const SizedBox.shrink(),
                       ],
-                    ),
-                  ),
-                  if ((_playbackSummary?.current != null ||
-                          lastVideo != null) &&
-                      !compact)
-                    _MiniPlayer(
-                      item: _playbackSummary?.current ?? lastVideo!,
-                      showLivePreview: _playbackSummary?.current != null,
-                      isPlaying: _playbackSummary?.isPlaying ?? false,
-                      positionMs:
-                          _playbackSummary?.positionMs ??
-                          (lastVideo?.lastPositionMs ?? 0),
-                      durationMs:
-                          _playbackSummary?.durationMs ??
-                          (lastVideo?.duration ?? 0),
-                      strings: t,
-                      onOpen: _playbackSummary?.current == null
-                          ? _playLastVideo
-                          : _openPlayerFromMini,
-                      onPlayPause: _playbackSummary?.current == null
-                          ? _playLastVideo
-                          : _playPause,
-                      onNext: _playbackSummary?.current == null ? null : _next,
-                      onStop: _playbackSummary?.current == null ? null : _stop,
-                    ),
-                ],
-              );
-            },
+                    );
+                    if (!hasMini || !useFloatingMini) {
+                      return content;
+                    }
+                    return Stack(
+                      children: [
+                        Positioned.fill(child: content),
+                        Positioned(
+                          right: 12,
+                          bottom: 12,
+                          child: _FloatingMiniControl(
+                            item: _playbackSummary?.current ?? lastVideo!,
+                            isPlaying: _playbackSummary?.isPlaying ?? false,
+                            strings: t,
+                            onOpen: _playbackSummary?.current == null
+                                ? _playLastVideo
+                                : _openPlayerFromMini,
+                            onPlayPause: _playbackSummary?.current == null
+                                ? _playLastVideo
+                                : _playPause,
+                            onNext: _playbackSummary?.current == null
+                                ? null
+                                : _next,
+                            onQueue: _playbackSummary?.current == null
+                                ? null
+                                : _showCurrentQueue,
+                            onStop: _playbackSummary?.current == null
+                                ? null
+                                : _stop,
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+              ),
+              if (tabSide == _SideTabSide.right)
+                _SideTabs(
+                  side: _SideTabSide.right,
+                  selectedIndex: _selectedTab.index,
+                  tabs: LibraryTab.values,
+                  labelFor: _tabLabel,
+                  onSelected: _busy ? null : _selectTab,
+                ),
+            ],
           ),
         ),
-        bottomNavigationBar: _BottomTabs(
-          selectedIndex: _selectedTab.index,
-          tabs: LibraryTab.values,
-          labelFor: _tabLabel,
-          onSelected: _busy ? null : _selectTab,
-        ),
+        bottomNavigationBar: useSideTabs
+            ? null
+            : _BottomTabs(
+                selectedIndex: _selectedTab.index,
+                tabs: LibraryTab.values,
+                labelFor: _tabLabel,
+                onSelected: _busy ? null : _selectTab,
+              ),
       ),
     );
   }
+
+  _SideTabSide? _resolvedSideTabSide(MediaQueryData mediaQuery) {
+    final phoneLandscape =
+        mediaQuery.orientation == Orientation.landscape &&
+        mediaQuery.size.shortestSide < 600;
+    return switch (_tabBarPlacement) {
+      TabBarPlacement.bottom => null,
+      TabBarPlacement.automatic => phoneLandscape ? _SideTabSide.right : null,
+      TabBarPlacement.landscapeLeft =>
+        phoneLandscape ? _SideTabSide.left : null,
+      TabBarPlacement.landscapeRight =>
+        phoneLandscape ? _SideTabSide.right : null,
+    };
+  }
+
+  LibraryViewMode _resolvedViewMode(MediaQueryData mediaQuery) {
+    return mediaQuery.orientation == Orientation.landscape
+        ? _landscapeViewMode
+        : _portraitViewMode;
+  }
+
+  List<DropdownMenuItem<LibraryViewMode>> _viewModeMenuItems() {
+    return [
+      DropdownMenuItem(
+        value: LibraryViewMode.list,
+        child: Text(t.listViewMode),
+      ),
+      DropdownMenuItem(
+        value: LibraryViewMode.grid,
+        child: Text(t.gridViewMode),
+      ),
+    ];
+  }
 }
+
+enum _SideTabSide { left, right }
 
 class _RoundActionButton extends StatelessWidget {
   const _RoundActionButton({
@@ -2537,23 +3117,21 @@ class _RoundActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final enabled = onPressed != null;
     return Padding(
-      padding: const EdgeInsets.only(right: 8),
-      child: Tooltip(
-        message: tooltip,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: onPressed,
-          child: Container(
-            width: 38,
-            height: 38,
-            decoration: BoxDecoration(
-              color: _Ui.surface2,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Icon(icon, color: _Ui.text2, size: 20),
-          ),
+      padding: const EdgeInsets.only(right: 4),
+      child: IconButton(
+        tooltip: tooltip,
+        onPressed: onPressed,
+        splashRadius: 20,
+        padding: EdgeInsets.zero,
+        constraints: const BoxConstraints.tightFor(width: 40, height: 40),
+        style: const ButtonStyle(
+          backgroundColor: WidgetStatePropertyAll(Colors.transparent),
+          shadowColor: WidgetStatePropertyAll(Colors.transparent),
+          surfaceTintColor: WidgetStatePropertyAll(Colors.transparent),
         ),
+        icon: Icon(icon, color: enabled ? _Ui.text2 : _Ui.text3, size: 21),
       ),
     );
   }
@@ -2630,7 +3208,7 @@ class _BottomTabs extends StatelessWidget {
     return SafeArea(
       top: false,
       child: Container(
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           color: _Ui.card,
           border: Border(top: BorderSide(color: _Ui.border)),
         ),
@@ -2650,6 +3228,58 @@ class _BottomTabs extends StatelessWidget {
               ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _SideTabs extends StatelessWidget {
+  const _SideTabs({
+    required this.side,
+    required this.selectedIndex,
+    required this.tabs,
+    required this.labelFor,
+    required this.onSelected,
+  });
+
+  final _SideTabSide side;
+  final int selectedIndex;
+  final List<LibraryTab> tabs;
+  final String Function(LibraryTab tab) labelFor;
+  final ValueChanged<int>? onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final visibleTabs = <LibraryTab>[
+      LibraryTab.all,
+      LibraryTab.recent,
+      LibraryTab.drive,
+      LibraryTab.playlist,
+    ];
+    final selectedTab = tabs[selectedIndex];
+    return Container(
+      width: 72,
+      decoration: BoxDecoration(
+        color: _Ui.card,
+        border: side == _SideTabSide.left
+            ? Border(right: BorderSide(color: _Ui.border))
+            : Border(left: BorderSide(color: _Ui.border)),
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          for (final tab in visibleTabs)
+            Expanded(
+              child: _BottomTabButton(
+                selected: selectedTab == tab,
+                icon: tab.icon,
+                label: labelFor(tab),
+                onTap: onSelected == null
+                    ? null
+                    : () => onSelected!(tabs.indexOf(tab)),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -2740,6 +3370,7 @@ class _LibraryHeader extends StatelessWidget {
     required this.strings,
     required this.tabLabel,
     required this.onAddDrive,
+    required this.onPlayInOrder,
     required this.onShuffle,
     required this.onCreatePlaylist,
   });
@@ -2751,6 +3382,7 @@ class _LibraryHeader extends StatelessWidget {
   final AppStrings strings;
   final String tabLabel;
   final VoidCallback onAddDrive;
+  final VoidCallback? onPlayInOrder;
   final VoidCallback? onShuffle;
   final VoidCallback? onCreatePlaylist;
 
@@ -2789,9 +3421,17 @@ class _LibraryHeader extends StatelessWidget {
               ],
             ),
           ),
-          _CompactHeaderButton(
+          _CompactHeaderTextButton(
+            tooltip: strings.playInOrder,
+            icon: Icons.play_arrow,
+            label: strings.playInOrder,
+            onTap: onPlayInOrder,
+          ),
+          const SizedBox(width: 6),
+          _CompactHeaderTextButton(
             tooltip: strings.shufflePlay,
             icon: Icons.shuffle,
+            label: strings.shufflePlay,
             onTap: onShuffle,
             active: true,
           ),
@@ -2806,9 +3446,10 @@ class _LibraryHeader extends StatelessWidget {
           ],
           if (selectedTab == LibraryTab.playlist) ...[
             const SizedBox(width: 6),
-            _CompactHeaderButton(
+            _CompactHeaderTextButton(
               tooltip: strings.createPlaylist,
               icon: Icons.add,
+              label: strings.newPlaylist,
               onTap: onCreatePlaylist,
             ),
           ],
@@ -2852,11 +3493,7 @@ class _PlaylistSliverList extends StatelessWidget {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(
-                  Icons.queue_music_outlined,
-                  size: 44,
-                  color: _Ui.text3,
-                ),
+                Icon(Icons.queue_music_outlined, size: 44, color: _Ui.text3),
                 const SizedBox(height: 12),
                 Text(strings.playlistEmpty, textAlign: TextAlign.center),
                 const SizedBox(height: 12),
@@ -2937,10 +3574,7 @@ class _PlaylistTile extends StatelessWidget {
                         color: _Ui.surface2,
                         borderRadius: BorderRadius.circular(5),
                       ),
-                      child: const Icon(
-                        Icons.queue_music_outlined,
-                        color: _Ui.text3,
-                      ),
+                      child: Icon(Icons.queue_music_outlined, color: _Ui.text3),
                     )
                   : _VideoThumb(
                       source: coverItem.source,
@@ -2956,7 +3590,7 @@ class _PlaylistTile extends StatelessWidget {
                       playlist.name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                         color: _Ui.text,
                         fontSize: 14,
                         fontWeight: FontWeight.w800,
@@ -2973,10 +3607,7 @@ class _PlaylistTile extends StatelessWidget {
                           _SourcePill(label: playlist.sourceLabel),
                         Text(
                           _formatDate(playlist.updatedAt),
-                          style: const TextStyle(
-                            color: _Ui.text2,
-                            fontSize: 11,
-                          ),
+                          style: TextStyle(color: _Ui.text2, fontSize: 11),
                         ),
                       ],
                     ),
@@ -2989,7 +3620,7 @@ class _PlaylistTile extends StatelessWidget {
                 icon: const Icon(Icons.play_arrow),
               ),
               PopupMenuButton<String>(
-                icon: const Icon(Icons.more_vert, color: _Ui.text3),
+                icon: Icon(Icons.more_vert, color: _Ui.text3),
                 onSelected: (value) {
                   if (value == 'rename') onRename();
                   if (value == 'delete') onDelete();
@@ -3007,16 +3638,18 @@ class _PlaylistTile extends StatelessWidget {
   }
 }
 
-class _CompactHeaderButton extends StatelessWidget {
-  const _CompactHeaderButton({
+class _CompactHeaderTextButton extends StatelessWidget {
+  const _CompactHeaderTextButton({
     required this.tooltip,
     required this.icon,
+    required this.label,
     required this.onTap,
     this.active = false,
   });
 
   final String tooltip;
   final IconData icon;
+  final String label;
   final VoidCallback? onTap;
   final bool active;
 
@@ -3027,69 +3660,38 @@ class _CompactHeaderButton extends StatelessWidget {
     return Tooltip(
       message: tooltip,
       child: InkWell(
-        borderRadius: BorderRadius.circular(8),
-        onTap: onTap,
-        child: Container(
-          width: 38,
-          height: 38,
-          decoration: BoxDecoration(
-            color: highlighted ? _Ui.accent : _Ui.surface2,
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Icon(
-            icon,
-            color: highlighted
-                ? Colors.white
-                : enabled
-                ? _Ui.text2
-                : _Ui.text3,
-            size: 19,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _CompactHeaderTextButton extends StatelessWidget {
-  const _CompactHeaderTextButton({
-    required this.tooltip,
-    required this.icon,
-    required this.label,
-    required this.onTap,
-  });
-
-  final String tooltip;
-  final IconData icon;
-  final String label;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final enabled = onTap != null;
-    return Tooltip(
-      message: tooltip,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(7),
         onTap: onTap,
         child: Container(
           height: 38,
           padding: const EdgeInsets.symmetric(horizontal: 10),
           decoration: BoxDecoration(
-            color: _Ui.accentDim,
-            borderRadius: BorderRadius.circular(8),
+            color: highlighted ? _Ui.accentDim : _Ui.surface2,
+            borderRadius: BorderRadius.circular(7),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, color: enabled ? _Ui.accentDark : _Ui.text3, size: 18),
+              Icon(
+                icon,
+                color: highlighted
+                    ? _Ui.accentDark
+                    : enabled
+                    ? _Ui.text2
+                    : _Ui.text3,
+                size: 18,
+              ),
               const SizedBox(width: 5),
               Text(
                 label,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  color: enabled ? _Ui.accentDark : _Ui.text3,
+                  color: highlighted
+                      ? _Ui.accentDark
+                      : enabled
+                      ? _Ui.text2
+                      : _Ui.text3,
                   fontSize: 12,
                   fontWeight: FontWeight.w800,
                 ),
@@ -3119,7 +3721,7 @@ class _ResumeBadge extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
         child: Text(
           text,
-          style: const TextStyle(
+          style: TextStyle(
             color: _Ui.accentDark,
             fontSize: 10,
             fontWeight: FontWeight.w800,
@@ -3146,7 +3748,7 @@ class _SourcePill extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
         child: Text(
           label,
-          style: const TextStyle(
+          style: TextStyle(
             color: _Ui.text2,
             fontSize: 10,
             fontWeight: FontWeight.w700,
@@ -3240,6 +3842,38 @@ class _VideoSliverList extends StatelessWidget {
         }
       }
       return SliverList(delegate: SliverChildListDelegate(children));
+    }
+
+    if (viewMode == LibraryViewMode.grid) {
+      final isLandscape =
+          MediaQuery.orientationOf(context) == Orientation.landscape;
+      return SliverPadding(
+        padding: const EdgeInsets.fromLTRB(10, 0, 10, 12),
+        sliver: SliverGrid.builder(
+          itemCount: videos.length,
+          gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+            maxCrossAxisExtent: isLandscape ? 210 : 220,
+            mainAxisSpacing: 8,
+            crossAxisSpacing: 8,
+            childAspectRatio: isLandscape ? 1.68 : 1.32,
+          ),
+          itemBuilder: (context, index) {
+            final item = videos[index];
+            return _VideoGridTile(
+              item: item,
+              busy: busy,
+              selected: selectedIds.contains(item.id),
+              selectionMode: selectedIds.isNotEmpty,
+              onPlay: () => onPlay(item),
+              onToggleSelection: () => onToggleSelection(item),
+              onToggleFavorite: () => onToggleFavorite(item),
+              onRemove: () => onRemove(item),
+              strings: strings,
+              removeLabel: removeLabel,
+            );
+          },
+        ),
+      );
     }
 
     return SliverPadding(
@@ -3362,7 +3996,7 @@ class _VideoTile extends StatelessWidget {
                           item.title,
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
+                          style: TextStyle(
                             color: _Ui.text,
                             fontSize: 13.5,
                             fontWeight: FontWeight.w800,
@@ -3385,7 +4019,7 @@ class _VideoTile extends StatelessWidget {
                                 _metadataText(item, strings),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
+                                style: TextStyle(
                                   color: _Ui.text2,
                                   fontSize: 11,
                                 ),
@@ -3422,7 +4056,7 @@ class _VideoTile extends StatelessWidget {
                         PopupMenuButton<String>(
                           enabled: !busy,
                           padding: EdgeInsets.zero,
-                          icon: const Icon(
+                          icon: Icon(
                             Icons.more_vert,
                             size: 18,
                             color: _Ui.text3,
@@ -3475,6 +4109,183 @@ class _VideoTile extends StatelessWidget {
       parts.add('${strings.recentlyPlayed} ${_formatDate(item.lastPlayedAt!)}');
     }
     return parts.join(' - ');
+  }
+}
+
+class _VideoGridTile extends StatelessWidget {
+  const _VideoGridTile({
+    required this.item,
+    required this.busy,
+    required this.selected,
+    required this.selectionMode,
+    required this.strings,
+    required this.onPlay,
+    required this.onToggleSelection,
+    required this.onToggleFavorite,
+    required this.onRemove,
+    required this.removeLabel,
+  });
+
+  final VideoItem item;
+  final bool busy;
+  final bool selected;
+  final bool selectionMode;
+  final AppStrings strings;
+  final VoidCallback onPlay;
+  final VoidCallback onToggleSelection;
+  final VoidCallback onToggleFavorite;
+  final VoidCallback onRemove;
+  final String removeLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: selected ? _Ui.accentDim : _Ui.card,
+      borderRadius: BorderRadius.circular(8),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onLongPress: busy ? null : onToggleSelection,
+        onTap: busy ? null : (selectionMode ? onToggleSelection : onPlay),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            LayoutBuilder(
+              builder: (context, constraints) {
+                return _VideoThumb(
+                  source: item.source,
+                  thumbnailBase64: item.thumbnailBase64,
+                  thumbnailUrl: item.thumbnailUrl,
+                  width: constraints.maxWidth,
+                  height: constraints.maxHeight,
+                  borderRadius: 0,
+                );
+              },
+            ),
+            Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withValues(alpha: 0.22),
+                      Colors.transparent,
+                      Colors.black.withValues(alpha: 0.72),
+                    ],
+                    stops: const [0.0, 0.45, 1.0],
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              left: 7,
+              top: 7,
+              child: _SourcePill(
+                label: item.source == VideoSource.drive
+                    ? 'Drive'
+                    : strings.local,
+              ),
+            ),
+            Positioned(
+              right: 3,
+              top: 2,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  InkWell(
+                    borderRadius: BorderRadius.circular(16),
+                    onTap: busy ? null : onToggleFavorite,
+                    child: Padding(
+                      padding: const EdgeInsets.all(5),
+                      child: Icon(
+                        item.isFavorite ? Icons.star : Icons.star_border,
+                        color: item.isFavorite ? _Ui.yellow : Colors.white,
+                        size: 17,
+                      ),
+                    ),
+                  ),
+                  PopupMenuButton<String>(
+                    enabled: !busy,
+                    padding: EdgeInsets.zero,
+                    icon: const Icon(
+                      Icons.more_vert,
+                      size: 17,
+                      color: Colors.white,
+                    ),
+                    onSelected: (value) {
+                      if (value == 'delete') onRemove();
+                    },
+                    itemBuilder: (context) => [
+                      PopupMenuItem(value: 'delete', child: Text(removeLabel)),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            if (item.duration != null && item.duration! > 0)
+              Positioned(
+                right: 7,
+                bottom: 27,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.70),
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 5,
+                      vertical: 1,
+                    ),
+                    child: Text(
+                      _formatDuration(item.duration!),
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            Positioned(
+              left: 8,
+              right: 8,
+              bottom: 7,
+              child: Text(
+                item.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w800,
+                  shadows: [Shadow(color: Colors.black, blurRadius: 4)],
+                ),
+              ),
+            ),
+            if (item.lastPositionMs > 0)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: LinearProgressIndicator(
+                  minHeight: 2,
+                  value: item.duration != null && item.duration! > 0
+                      ? (item.lastPositionMs / item.duration!).clamp(0.0, 1.0)
+                      : null,
+                  backgroundColor: Colors.white.withValues(alpha: 0.24),
+                  color: _Ui.accent,
+                ),
+              ),
+            if (selected)
+              ColoredBox(
+                color: Colors.black.withValues(alpha: 0.42),
+                child: const Icon(Icons.check_circle, color: Colors.white),
+              ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -3617,6 +4428,7 @@ class _MiniPlayer extends StatelessWidget {
     required this.onOpen,
     required this.onPlayPause,
     required this.onNext,
+    required this.onQueue,
     required this.onStop,
   });
 
@@ -3629,6 +4441,7 @@ class _MiniPlayer extends StatelessWidget {
   final VoidCallback onOpen;
   final VoidCallback onPlayPause;
   final VoidCallback? onNext;
+  final VoidCallback? onQueue;
   final VoidCallback? onStop;
 
   @override
@@ -3669,7 +4482,7 @@ class _MiniPlayer extends StatelessWidget {
                             item.title,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
+                            style: TextStyle(
                               color: _Ui.text,
                               fontSize: 12,
                               fontWeight: FontWeight.w800,
@@ -3697,6 +4510,20 @@ class _MiniPlayer extends StatelessWidget {
                       icon: isPlaying ? Icons.pause : Icons.play_arrow,
                       onPressed: onPlayPause,
                     ),
+                    IconButton(
+                      tooltip: strings.currentQueue,
+                      onPressed: onQueue,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints.tightFor(
+                        width: 34,
+                        height: 34,
+                      ),
+                      icon: Icon(
+                        Icons.queue_music,
+                        size: 19,
+                        color: onQueue == null ? _Ui.text3 : _Ui.text2,
+                      ),
+                    ),
                     const SizedBox(width: 10),
                   ],
                 ),
@@ -3704,6 +4531,117 @@ class _MiniPlayer extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _FloatingMiniControl extends StatelessWidget {
+  const _FloatingMiniControl({
+    required this.item,
+    required this.isPlaying,
+    required this.strings,
+    required this.onOpen,
+    required this.onPlayPause,
+    required this.onNext,
+    required this.onQueue,
+    required this.onStop,
+  });
+
+  final VideoItem item;
+  final bool isPlaying;
+  final AppStrings strings;
+  final VoidCallback onOpen;
+  final VoidCallback onPlayPause;
+  final VoidCallback? onNext;
+  final VoidCallback? onQueue;
+  final VoidCallback? onStop;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      elevation: 10,
+      borderRadius: BorderRadius.circular(999),
+      shadowColor: Colors.black.withValues(alpha: 0.18),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(999),
+        onTap: onOpen,
+        child: Container(
+          width: 360,
+          height: 42,
+          padding: const EdgeInsets.only(left: 12, right: 4),
+          decoration: BoxDecoration(
+            color: _Ui.card.withValues(alpha: 0.96),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: _Ui.border),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.graphic_eq, size: 17, color: _Ui.accentDark),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  item.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: _Ui.text,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              _MiniFlatButton(
+                tooltip: isPlaying ? 'Pause' : 'Play',
+                icon: isPlaying ? Icons.pause : Icons.play_arrow,
+                onPressed: onPlayPause,
+              ),
+              _MiniFlatButton(
+                tooltip: 'Next',
+                icon: Icons.skip_next,
+                onPressed: onNext,
+              ),
+              _MiniFlatButton(
+                tooltip: strings.currentQueue,
+                icon: Icons.queue_music,
+                onPressed: onQueue,
+              ),
+              _MiniFlatButton(
+                tooltip: 'Stop',
+                icon: Icons.stop,
+                onPressed: onStop,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MiniFlatButton extends StatelessWidget {
+  const _MiniFlatButton({
+    required this.tooltip,
+    required this.icon,
+    required this.onPressed,
+  });
+
+  final String tooltip;
+  final IconData icon;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: tooltip,
+      onPressed: onPressed,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints.tightFor(width: 34, height: 34),
+      icon: Icon(
+        icon,
+        size: 18,
+        color: onPressed == null ? _Ui.text3 : _Ui.text2,
       ),
     );
   }
@@ -3723,7 +4661,9 @@ class _MiniPreview extends StatelessWidget {
         child: const SizedBox(
           width: 92,
           height: 52,
-          child: AndroidView(viewType: 'drive_shuffle_player/mini_player'),
+          child: IgnorePointer(
+            child: AndroidView(viewType: 'drive_shuffle_player/mini_player'),
+          ),
         ),
       );
     }
@@ -3753,10 +4693,7 @@ class _MiniCircleButton extends StatelessWidget {
         width: 36,
         height: 36,
         alignment: Alignment.center,
-        decoration: const BoxDecoration(
-          color: _Ui.surface2,
-          shape: BoxShape.circle,
-        ),
+        decoration: BoxDecoration(color: _Ui.surface2, shape: BoxShape.circle),
         child: Icon(icon, color: _Ui.text, size: 16),
       ),
     );
@@ -3840,6 +4777,19 @@ class _DrivePickerDialogState extends State<_DrivePickerDialog> {
 
   void _clearSelection() => setState(_selectedEntries.clear);
 
+  bool _handleBack() {
+    if (_collecting) return true;
+    if (_hasSelection) {
+      _clearSelection();
+      return true;
+    }
+    if (_path.length > 1) {
+      _goUp();
+      return true;
+    }
+    return false;
+  }
+
   Future<void> _importSelected() {
     final selected = _selectedEntries.values.toList();
     return _importEntries(
@@ -3905,6 +4855,7 @@ class _DrivePickerDialogState extends State<_DrivePickerDialog> {
           sourceName: sourceName,
           foldersScanned: foldersScanned,
           videosFound: videosFound,
+          createPlaylist: folders.isNotEmpty,
         ),
       );
     } finally {
@@ -3919,96 +4870,107 @@ class _DrivePickerDialogState extends State<_DrivePickerDialog> {
         .where((entry) => entry.isVideo)
         .length;
 
-    return Dialog.fullscreen(
-      child: Scaffold(
-        backgroundColor: _Ui.bg,
-        appBar: AppBar(
-          leading: IconButton(
-            tooltip: "Close",
-            onPressed: _collecting ? null : () => Navigator.pop(context),
-            icon: const Icon(Icons.close),
+    final hasInternalBackTarget =
+        _collecting || _hasSelection || _path.length > 1;
+
+    return PopScope(
+      canPop: !hasInternalBackTarget,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) _handleBack();
+      },
+      child: Dialog.fullscreen(
+        child: Scaffold(
+          backgroundColor: _Ui.bg,
+          appBar: AppBar(
+            leading: IconButton(
+              tooltip: "Close",
+              onPressed: _collecting ? null : () => Navigator.pop(context),
+              icon: const Icon(Icons.close),
+            ),
+            title: Text(_hasSelection ? "$selectedCount개 선택" : "Drive에서 가져오기"),
+            actions: [
+              if (_hasSelection)
+                TextButton(
+                  onPressed: _collecting ? null : _clearSelection,
+                  child: Text("선택 해제", style: TextStyle(color: _Ui.text2)),
+                ),
+              IconButton(
+                tooltip: "새로고침",
+                onPressed: _collecting ? null : _refresh,
+                icon: Icon(Icons.refresh, color: _Ui.text2),
+              ),
+            ],
           ),
-          title: Text(_hasSelection ? "$selectedCount개 선택" : "Drive에서 가져오기"),
-          actions: [
-            if (_hasSelection)
-              TextButton(
-                onPressed: _collecting ? null : _clearSelection,
-                child: const Text("선택 해제", style: TextStyle(color: _Ui.text2)),
-              ),
-            IconButton(
-              tooltip: "새로고침",
-              onPressed: _collecting ? null : _refresh,
-              icon: const Icon(Icons.refresh, color: _Ui.text2),
-            ),
-          ],
-        ),
-        body: Stack(
-          children: [
-            Column(
-              children: [
-                _DrivePickerPathBar(
-                  path: _path,
-                  onGoUp: _path.length > 1 ? _goUp : null,
-                ),
-                const Divider(height: 1),
-                Expanded(
-                  child: FutureBuilder<List<DriveEntry>>(
-                    future: _entries,
-                    builder: (context, snapshot) {
-                      if (snapshot.connectionState != ConnectionState.done) {
-                        return const Center(child: CircularProgressIndicator());
-                      }
-                      if (snapshot.hasError) {
-                        return Center(child: Text(snapshot.error.toString()));
-                      }
-
-                      final entries = snapshot.data ?? const [];
-                      _visibleEntries = entries;
-                      if (entries.isEmpty) {
-                        return const Center(
-                          child: Text('No items in this folder.'),
-                        );
-                      }
-
-                      return ListView.separated(
-                        padding: const EdgeInsets.only(bottom: 96),
-                        itemCount: entries.length,
-                        separatorBuilder: (context, index) =>
-                            const Divider(height: 1),
-                        itemBuilder: (context, index) {
-                          final entry = entries[index];
-                          return _DrivePickerEntryTile(
-                            entry: entry,
-                            selected: _selectedEntries.containsKey(entry.id),
-                            selectionMode: _hasSelection,
-                            onOpen: entry.isFolder
-                                ? () => _openFolder(entry)
-                                : null,
-                            onToggleSelected: () => _toggleSelected(entry),
-                          );
-                        },
-                      );
-                    },
+          body: Stack(
+            children: [
+              Column(
+                children: [
+                  _DrivePickerPathBar(
+                    path: _path,
+                    onGoUp: _path.length > 1 ? _goUp : null,
                   ),
-                ),
-              ],
-            ),
-            if (_collecting)
-              _DrivePickerImportOverlay(
-                collectingName: _collectingName,
-                currentScanFolder: _currentScanFolder,
-                scannedFolderCount: _scannedFolderCount,
-                foundVideoCount: _foundVideoCount,
+                  const Divider(height: 1),
+                  Expanded(
+                    child: FutureBuilder<List<DriveEntry>>(
+                      future: _entries,
+                      builder: (context, snapshot) {
+                        if (snapshot.connectionState != ConnectionState.done) {
+                          return const Center(
+                            child: CircularProgressIndicator(),
+                          );
+                        }
+                        if (snapshot.hasError) {
+                          return Center(child: Text(snapshot.error.toString()));
+                        }
+
+                        final entries = snapshot.data ?? const [];
+                        _visibleEntries = entries;
+                        if (entries.isEmpty) {
+                          return const Center(
+                            child: Text('No items in this folder.'),
+                          );
+                        }
+
+                        return ListView.separated(
+                          padding: const EdgeInsets.only(bottom: 96),
+                          itemCount: entries.length,
+                          separatorBuilder: (context, index) =>
+                              const Divider(height: 1),
+                          itemBuilder: (context, index) {
+                            final entry = entries[index];
+                            return _DrivePickerEntryTile(
+                              entry: entry,
+                              selected: _selectedEntries.containsKey(entry.id),
+                              selectionMode: _hasSelection,
+                              onOpen: entry.isFolder
+                                  ? () => _openFolder(entry)
+                                  : null,
+                              onToggleSelected: () => _toggleSelected(entry),
+                            );
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                ],
               ),
-          ],
-        ),
-        bottomNavigationBar: _DrivePickerSelectionBar(
-          selectedCount: selectedCount,
-          currentFolderVideos: currentFolderVideos,
-          collecting: _collecting,
-          onAddSelected: selectedCount == 0 ? null : _importSelected,
-          onClearSelection: selectedCount == 0 ? null : _clearSelection,
-          onAddCurrentFolder: _addCurrentFolderTree,
+              if (_collecting)
+                _DrivePickerImportOverlay(
+                  collectingName: _collectingName,
+                  currentScanFolder: _currentScanFolder,
+                  scannedFolderCount: _scannedFolderCount,
+                  foundVideoCount: _foundVideoCount,
+                ),
+            ],
+          ),
+          bottomNavigationBar: _DrivePickerSelectionBar(
+            selectedCount: selectedCount,
+            currentFolderVideos: currentFolderVideos,
+            collecting: _collecting,
+            onAddSelected: selectedCount == 0 ? null : _importSelected,
+            onClearSelection: selectedCount == 0 ? null : _clearSelection,
+            onAddCurrentFolder: _addCurrentFolderTree,
+          ),
         ),
       ),
     );
@@ -4110,8 +5072,8 @@ class _DrivePickerEntryTile extends StatelessWidget {
                 ),
               ),
               if (entry.isFolder && !selectionMode)
-                const Padding(
-                  padding: EdgeInsets.only(left: 8),
+                Padding(
+                  padding: const EdgeInsets.only(left: 8),
                   child: Icon(Icons.chevron_right, color: _Ui.text3),
                 ),
             ],
@@ -4146,7 +5108,7 @@ class _DrivePickerSelectionBar extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
         decoration: BoxDecoration(
           color: _Ui.card,
-          border: const Border(top: BorderSide(color: _Ui.border)),
+          border: Border(top: BorderSide(color: _Ui.border)),
         ),
         child: Wrap(
           spacing: 8,

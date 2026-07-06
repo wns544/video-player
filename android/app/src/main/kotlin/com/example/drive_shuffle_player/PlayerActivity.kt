@@ -1,9 +1,12 @@
 ﻿package com.example.drive_shuffle_player
 
 import android.app.Activity
+import android.app.PendingIntent
 import android.app.PictureInPictureParams
+import android.app.RemoteAction
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Canvas
 import android.graphics.Color
@@ -12,6 +15,7 @@ import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -27,6 +31,7 @@ import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -47,12 +52,14 @@ class PlayerActivity : Activity() {
     private lateinit var bottomPanel: LinearLayout
     private lateinit var centerPlayButton: IconGlassButton
     private lateinit var lockButton: IconGlassButton
+    private lateinit var shuffleButton: IconGlassButton
     private lateinit var unlockOverlay: FrameLayout
     private lateinit var titleText: TextView
     private lateinit var positionText: TextView
     private lateinit var durationText: TextView
-    private lateinit var resizeButton: TextView
+    private lateinit var resizeButton: IconGlassButton
     private lateinit var speedButton: TextView
+    private lateinit var repeatButton: IconGlassButton
     private lateinit var quickRow: LinearLayout
     private lateinit var progressView: PlayerProgressView
     private lateinit var hintText: TextView
@@ -71,10 +78,18 @@ class PlayerActivity : Activity() {
     private var playbackErrorMessage: String? = null
     private var locked = false
     private var inPip = false
+    private var enteringPip = false
     private var pendingUnlock = false
     private var controlsOnRight = true
     private var activityResumed = false
     private var progressUpdatesRunning = false
+    private var shuffleQueueActive = false
+    private var pendingSeekDirection = 0
+    private var pendingSeekSteps = 0
+    private var horizontalSeekDragging = false
+    private var horizontalSeekStartX = 0f
+    private var horizontalSeekAccumulatedMs = 0L
+    private var queueBeforeShuffle: List<MediaItem>? = null
 
     private val resizeModes = intArrayOf(
         AspectRatioFrameLayout.RESIZE_MODE_FIT,
@@ -107,6 +122,16 @@ class PlayerActivity : Activity() {
             handler.postDelayed(this, progressUpdateDelayMs())
         }
     }
+    private val enterPipRunnable = Runnable {
+        if (!enteringPip || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return@Runnable
+        if (isFinishing || isDestroyed || isInPictureInPictureMode) return@Runnable
+        hideChromeForPip()
+        updatePipParamsIfPossible()
+        enterPictureInPictureMode(buildPipParams())
+    }
+    private val commitAccumulatedSeekRunnable = Runnable {
+        commitAccumulatedSeek()
+    }
 
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
@@ -117,6 +142,7 @@ class PlayerActivity : Activity() {
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             updateControls()
+            updatePipParamsIfPossible()
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -124,14 +150,14 @@ class PlayerActivity : Activity() {
             playbackErrorMessage = null
             updateOverlay()
             updateControls()
+            updatePipParamsIfPossible()
         }
 
         override fun onPlayerError(error: PlaybackException) {
             val detail = error.cause?.message ?: error.message ?: error.errorCodeName
             Log.d(TAG, "error=${error.errorCodeName}: $detail", error)
             val httpStatus = httpStatusCodeFor(error)
-            val authError = httpStatus == 401 || httpStatus == 403 ||
-                error.errorCodeName.contains("IO_BAD_HTTP_STATUS")
+            val authError = httpStatus == 401 || httpStatus == 403
             PlaybackAuth.authError = authError
             PlaybackAuth.lastHttpStatusCode = httpStatus
             playbackErrorMessage =
@@ -146,6 +172,7 @@ class PlayerActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (handlePipActionIntent(intent)) return
         hideSystemBars()
         setContentView(buildContentView())
         showOverlay("플레이어 연결 중...")
@@ -162,6 +189,7 @@ class PlayerActivity : Activity() {
                         mediaController.addListener(playerListener)
                         updateOverlay()
                         updateControls()
+                        updatePipParamsIfPossible()
                         if (activityResumed) startProgressUpdates()
                     }
                 } catch (error: Throwable) {
@@ -178,7 +206,14 @@ class PlayerActivity : Activity() {
     override fun onResume() {
         super.onResume()
         activityResumed = true
+        enteringPip = false
         if (controller != null) startProgressUpdates()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handlePipActionIntent(intent)
     }
 
     override fun onPause() {
@@ -192,10 +227,16 @@ class PlayerActivity : Activity() {
         handler.removeCallbacks(hideControlsRunnable)
         handler.removeCallbacks(hideUnlockOverlayRunnable)
         handler.removeCallbacks(unlockRunnable)
+        handler.removeCallbacks(enterPipRunnable)
+        handler.removeCallbacks(commitAccumulatedSeekRunnable)
         stopProgressUpdates()
         controller?.removeListener(playerListener)
-        playerView.player = null
-        MediaController.releaseFuture(controllerFuture)
+        if (::playerView.isInitialized) {
+            playerView.player = null
+        }
+        if (::controllerFuture.isInitialized) {
+            MediaController.releaseFuture(controllerFuture)
+        }
         super.onDestroy()
     }
 
@@ -213,14 +254,12 @@ class PlayerActivity : Activity() {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         inPip = isInPictureInPictureMode
         if (inPip) {
-            controls.visibility = View.GONE
-            panelScrim.visibility = View.GONE
-            hintText.visibility = View.GONE
-            overlay.visibility = View.GONE
-            unlockOverlay.visibility = View.GONE
+            hideChromeForPip()
         } else {
+            enteringPip = false
             setControlsVisible(false)
             updateOverlay()
+            updatePipParamsIfPossible()
         }
     }
 
@@ -248,6 +287,13 @@ class PlayerActivity : Activity() {
                 }
                 if (inPip) return@setOnTouchListener true
                 gestureDetector.onTouchEvent(event)
+                if (
+                    horizontalSeekDragging &&
+                    (event.actionMasked == MotionEvent.ACTION_UP ||
+                        event.actionMasked == MotionEvent.ACTION_CANCEL)
+                ) {
+                    finishHorizontalSeekDrag()
+                }
                 true
             }
         }
@@ -291,8 +337,8 @@ class PlayerActivity : Activity() {
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.CENTER,
-            ),
+                Gravity.TOP or Gravity.CENTER_HORIZONTAL,
+            ).apply { topMargin = dp(88) },
         )
         root.addView(overlay)
         root.addView(panelScrim)
@@ -345,6 +391,10 @@ class PlayerActivity : Activity() {
                 setOnClickListener { finish() }
             }, LinearLayout.LayoutParams(dp(52), dp(52)))
             addView(titleText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(IconGlassButton(this@PlayerActivity, ICON_QUEUE).apply {
+                setOnClickListener { safeAction { showQueuePanel() } }
+            }, LinearLayout.LayoutParams(dp(52), dp(52)))
+            addView(space(10))
             addView(lockButton, LinearLayout.LayoutParams(dp(52), dp(52)))
             addView(space(10))
             addView(IconGlassButton(this@PlayerActivity, ICON_MENU).apply {
@@ -352,11 +402,18 @@ class PlayerActivity : Activity() {
             }, LinearLayout.LayoutParams(dp(52), dp(52)))
         }
 
-        val centerLayer = FrameLayout(this).apply {
-            addView(
-                centerPlayButton,
-                FrameLayout.LayoutParams(dp(82), dp(82), Gravity.CENTER),
-            )
+        val centerLayer = LinearLayout(this).apply {
+            gravity = Gravity.CENTER
+            orientation = LinearLayout.HORIZONTAL
+            addView(IconGlassButton(this@PlayerActivity, ICON_PREVIOUS).apply {
+                setOnClickListener { safeAction { controller?.seekToPreviousMediaItem() } }
+            }, LinearLayout.LayoutParams(dp(56), dp(56)))
+            addView(space(42))
+            addView(centerPlayButton, LinearLayout.LayoutParams(dp(82), dp(82)))
+            addView(space(42))
+            addView(IconGlassButton(this@PlayerActivity, ICON_NEXT).apply {
+                setOnClickListener { safeAction { controller?.seekToNextMediaItem() } }
+            }, LinearLayout.LayoutParams(dp(56), dp(56)))
         }
 
         val timeRow = LinearLayout(this).apply {
@@ -364,12 +421,24 @@ class PlayerActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(18), 0, dp(18), 0)
             addView(positionText, LinearLayout.LayoutParams(dp(70), LinearLayout.LayoutParams.WRAP_CONTENT))
+            addView(space(10))
             addView(progressView, LinearLayout.LayoutParams(0, dp(36), 1f))
+            addView(space(10))
             addView(durationText, LinearLayout.LayoutParams(dp(70), LinearLayout.LayoutParams.WRAP_CONTENT))
         }
 
-        resizeButton = pillButton(resizeModeLabels[resizeModeIndex]) { cycleResizeMode() }
-        speedButton = pillButton(formatSpeedLabel()) { showSpeedPanel() }
+        resizeButton = IconGlassButton(this, ICON_RESIZE).apply {
+            setOnClickListener { safeAction { cycleResizeMode() } }
+        }
+        speedButton = pillButton(formatSpeedLabel()) { showSpeedPanel() }.apply {
+            setOnLongClickListener {
+                setPlaybackSpeed(1.0f)
+                true
+            }
+        }
+        repeatButton = IconGlassButton(this, ICON_REPEAT).apply {
+            setOnClickListener { safeAction { toggleRepeatMode() } }
+        }
 
         quickRow = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL or Gravity.END
@@ -428,24 +497,42 @@ class PlayerActivity : Activity() {
             quickRow.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
             addSwapButton()
         }
+        quickRow.addView(space(8))
+        quickRow.addView(resizeButton, LinearLayout.LayoutParams(dp(48), dp(48)))
     }
 
     private fun addQuickActions() {
-        quickRow.addView(IconGlassButton(this, ICON_PREVIOUS).apply {
-            setOnClickListener { safeAction { controller?.seekToPreviousMediaItem() } }
-        }, LinearLayout.LayoutParams(dp(48), dp(48)))
-        quickRow.addView(space(8))
-        quickRow.addView(IconGlassButton(this, ICON_NEXT).apply {
-            setOnClickListener { safeAction { controller?.seekToNextMediaItem() } }
-        }, LinearLayout.LayoutParams(dp(48), dp(48)))
-        quickRow.addView(space(8))
-        quickRow.addView(resizeButton)
+        shuffleButton = IconGlassButton(this, ICON_SHUFFLE).apply {
+            setOnClickListener { safeAction { toggleShuffleMode() } }
+        }
+        quickRow.addView(shuffleButton, LinearLayout.LayoutParams(dp(48), dp(48)))
         quickRow.addView(space(8))
         quickRow.addView(speedButton)
         quickRow.addView(space(8))
         quickRow.addView(IconGlassButton(this, ICON_PIP).apply {
-            setOnClickListener { safeAction { enterPipMode() } }
+            setOnTouchListener { _, event ->
+                if (locked || inPip) return@setOnTouchListener true
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        enteringPip = true
+                        hideChromeForPip()
+                        updatePipParamsIfPossible()
+                        true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        enterPipMode()
+                        true
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        enteringPip = false
+                        true
+                    }
+                    else -> true
+                }
+            }
         }, LinearLayout.LayoutParams(dp(52), dp(48)))
+        quickRow.addView(space(8))
+        quickRow.addView(repeatButton, LinearLayout.LayoutParams(dp(48), dp(48)))
     }
 
     private fun addSwapButton() {
@@ -496,7 +583,12 @@ class PlayerActivity : Activity() {
             visibility = View.GONE
             isClickable = true
             setOnClickListener {
-                if (locked) showUnlockOverlayTemporarily()
+                if (!locked) return@setOnClickListener
+                if (visibility == View.VISIBLE) {
+                    hideUnlockOverlayNow()
+                } else {
+                    showUnlockOverlayTemporarily()
+                }
             }
             addView(
                 hint,
@@ -520,7 +612,7 @@ class PlayerActivity : Activity() {
     private fun buildPanelScrim(): FrameLayout {
         return FrameLayout(this).apply {
             visibility = View.GONE
-            setBackgroundColor(Color.argb(72, 0, 0, 0))
+            setBackgroundColor(Color.argb(24, 0, 0, 0))
             setOnClickListener { hidePanel() }
         }
     }
@@ -556,8 +648,10 @@ class PlayerActivity : Activity() {
     private fun safeAction(action: () -> Unit) {
         if (locked || inPip) return
         action()
-        setControlsVisible(true)
-        scheduleHideControls()
+        if (!enteringPip && !isInPictureInPictureMode) {
+            setControlsVisible(true)
+            scheduleHideControls()
+        }
     }
 
     private fun space(widthDp: Int): View {
@@ -617,6 +711,78 @@ class PlayerActivity : Activity() {
         updateControls()
     }
 
+    private fun toggleShuffleMode() {
+        val mediaController = controller ?: return
+        if (mediaController.mediaItemCount <= 1) {
+            shuffleQueueActive = false
+            queueBeforeShuffle = null
+            mediaController.shuffleModeEnabled = false
+            updateControls()
+            showHint("셔플할 다음 영상이 없습니다")
+            return
+        }
+        if (shuffleQueueActive) {
+            restoreQueueBeforeShuffle(mediaController)
+            shuffleQueueActive = false
+            queueBeforeShuffle = null
+            showHint("셔플 꺼짐 · 큐 순서 복원")
+        } else {
+            queueBeforeShuffle = collectQueue(mediaController)
+            shuffleQueue(mediaController)
+            shuffleQueueActive = true
+            showHint("셔플 켜짐 · 큐를 섞었습니다")
+        }
+        mediaController.shuffleModeEnabled = false
+        updateControls()
+    }
+
+    private fun collectQueue(mediaController: MediaController): List<MediaItem> {
+        return List(mediaController.mediaItemCount) { index ->
+            mediaController.getMediaItemAt(index)
+        }
+    }
+
+    private fun shuffleQueue(mediaController: MediaController) {
+        val currentIndex = mediaController.currentMediaItemIndex.coerceAtLeast(0)
+        val current = mediaController.currentMediaItem ?: mediaController.getMediaItemAt(currentIndex)
+        val rest = collectQueue(mediaController).filterIndexed { index, _ -> index != currentIndex }.toMutableList()
+        rest.shuffle()
+        replaceQueueKeepingCurrent(mediaController, listOf(current) + rest, 0)
+    }
+
+    private fun restoreQueueBeforeShuffle(mediaController: MediaController) {
+        val originalQueue = queueBeforeShuffle ?: return
+        val currentId = mediaController.currentMediaItem?.mediaId
+        val restoredIndex = originalQueue.indexOfFirst { it.mediaId == currentId }.takeIf { it >= 0 }
+            ?: mediaController.currentMediaItemIndex.coerceIn(0, originalQueue.lastIndex)
+        replaceQueueKeepingCurrent(mediaController, originalQueue, restoredIndex)
+    }
+
+    private fun replaceQueueKeepingCurrent(
+        mediaController: MediaController,
+        queue: List<MediaItem>,
+        currentIndex: Int,
+    ) {
+        val position = mediaController.currentPosition.coerceAtLeast(0L)
+        val wasPlaying = mediaController.isPlaying
+        mediaController.setMediaItems(queue, currentIndex, position)
+        mediaController.prepare()
+        if (wasPlaying) {
+            mediaController.play()
+        }
+    }
+
+    private fun toggleRepeatMode() {
+        val mediaController = controller ?: return
+        mediaController.repeatMode = when (mediaController.repeatMode) {
+            Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
+            Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
+            else -> Player.REPEAT_MODE_OFF
+        }
+        updateControls()
+        showHint("반복: ${repeatModeLabel(mediaController.repeatMode)}")
+    }
+
     private fun lockPlayer() {
         locked = true
         pendingUnlock = false
@@ -632,6 +798,15 @@ class PlayerActivity : Activity() {
         handler.removeCallbacks(hideUnlockOverlayRunnable)
         unlockOverlay.visibility = View.VISIBLE
         handler.postDelayed(hideUnlockOverlayRunnable, 1500)
+    }
+
+    private fun hideUnlockOverlayNow() {
+        pendingUnlock = false
+        handler.removeCallbacks(unlockRunnable)
+        handler.removeCallbacks(hideUnlockOverlayRunnable)
+        handler.removeCallbacks(hideHintRunnable)
+        unlockOverlay.visibility = View.GONE
+        hintText.visibility = View.GONE
     }
 
     private fun setControlsVisible(visible: Boolean) {
@@ -679,7 +854,7 @@ class PlayerActivity : Activity() {
     private fun setResizeMode(index: Int) {
         resizeModeIndex = index.coerceIn(resizeModes.indices)
         playerView.resizeMode = resizeModes[resizeModeIndex]
-        if (::resizeButton.isInitialized) resizeButton.text = resizeModeLabels[resizeModeIndex]
+        if (::resizeButton.isInitialized) resizeButton.invalidate()
         showHint("화면 비율: ${resizeModeLabels[resizeModeIndex]}")
     }
 
@@ -697,7 +872,7 @@ class PlayerActivity : Activity() {
         val speedValue = TextView(this).apply {
             text = formatSpeedLabel()
             setTextColor(Color.WHITE)
-            textSize = 30f
+            textSize = 24f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             includeFontPadding = false
@@ -710,40 +885,60 @@ class PlayerActivity : Activity() {
             }
             onSpeedCommitted = { setPlaybackSpeed(it) }
         }
-        val row = LinearLayout(this).apply {
+        val sliderRow = LinearLayout(this).apply {
             gravity = Gravity.CENTER
             orientation = LinearLayout.HORIZONTAL
-            addView(panelStepButton("-0.05") {
+            addView(panelStepButton("-", compact = true) {
                 setPlaybackSpeed(playbackSpeed - 0.05f)
                 slider.speed = playbackSpeed
                 slider.invalidate()
                 speedValue.text = formatSpeedLabel()
             })
-            addView(space(12))
-            addView(panelStepButton("+0.05") {
+            addView(space(10))
+            addView(slider, LinearLayout.LayoutParams(0, dp(48), 1f))
+            addView(space(10))
+            addView(panelStepButton("+", compact = true) {
                 setPlaybackSpeed(playbackSpeed + 0.05f)
                 slider.speed = playbackSpeed
                 slider.invalidate()
                 speedValue.text = formatSpeedLabel()
             })
         }
-        val panel = panelContainer("재생 속도").apply {
-            addView(speedValue, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
-            addView(slider, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(56)))
-            addView(row)
+        val resetRow = LinearLayout(this).apply {
+            gravity = Gravity.CENTER
+            orientation = LinearLayout.HORIZONTAL
+            addView(TextView(this@PlayerActivity).apply {
+                text = "↻ 1.00x"
+                setTextColor(Color.WHITE)
+                textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER
+                setPadding(dp(10), dp(6), dp(10), dp(6))
+                setOnClickListener {
+                    setPlaybackSpeed(1.0f)
+                    slider.speed = playbackSpeed
+                    slider.invalidate()
+                    speedValue.text = formatSpeedLabel()
+                }
+            })
         }
-        showPanel(panel)
+        val panel = panelContainer("재생 속도", compact = true).apply {
+            addView(speedValue, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)))
+            addView(sliderRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
+            addView(resetRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(36)))
+        }
+        showPanel(panel, widthDp = 320, gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL, bottomMarginDp = 124)
     }
 
-    private fun panelStepButton(label: String, action: () -> Unit): TextView {
+    private fun panelStepButton(label: String, compact: Boolean = false, action: () -> Unit): TextView {
         return TextView(this).apply {
             text = label
             setTextColor(Color.WHITE)
             textSize = 15f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            minWidth = dp(112)
-            minHeight = dp(46)
+            minWidth = dp(if (compact) 44 else 92)
+            minHeight = dp(40)
             background = glassPillBackground()
             setOnClickListener { action() }
         }
@@ -755,7 +950,23 @@ class PlayerActivity : Activity() {
             showHint("재생 중인 영상이 없습니다")
             return
         }
-        val panel = panelContainer("플레이어 설정").apply {
+        val panel = panelContainer("플레이어 설정", compact = true).apply {
+            addView(panelOption(
+                "현재 큐",
+                if (shuffleQueueActive) {
+                    "${mediaController.mediaItemCount}개 · 섞인 순서"
+                } else {
+                    "${mediaController.mediaItemCount}개 영상"
+                },
+            ) {
+                showQueuePanel()
+            })
+            addView(panelOption("반복 모드", repeatModeLabel(mediaController.repeatMode)) {
+                toggleRepeatMode()
+            })
+            addView(panelOption("재생 정지", "현재 큐를 비우고 플레이어를 닫습니다") {
+                stopPlaybackAndClose()
+            })
             addView(panelOption("자막", "다음 단계에서 지원 예정") {
                 hidePanel()
                 showHint("자막은 다음 단계에서 지원 예정")
@@ -765,21 +976,83 @@ class PlayerActivity : Activity() {
                 showHint("오디오 트랙은 다음 단계에서 지원 예정")
             })
         }
-        showPanel(panel)
+        showPanel(panel, widthDp = 260, gravity = Gravity.TOP or Gravity.RIGHT, topMarginDp = 84, rightMarginDp = 18)
     }
 
-    private fun panelContainer(title: String): LinearLayout {
+    private fun showQueuePanel() {
+        val mediaController = controller
+        if (mediaController == null || mediaController.mediaItemCount <= 0) {
+            showHint("현재 큐가 없습니다")
+            return
+        }
+        hidePanel()
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        for (index in 0 until mediaController.mediaItemCount) {
+            val item = mediaController.getMediaItemAt(index)
+            val title = item.mediaMetadata.title?.toString().takeUnless { it.isNullOrBlank() }
+                ?: item.mediaId
+            val isCurrent = index == mediaController.currentMediaItemIndex
+            list.addView(panelOption(
+                if (isCurrent) "▶ ${index + 1}. $title" else "${index + 1}. $title",
+                if (isCurrent) "현재 재생 중" else "탭해서 이동",
+            ) {
+                mediaController.seekToDefaultPosition(index)
+                mediaController.play()
+                hidePanel()
+            })
+        }
+        val scroll = ScrollView(this).apply {
+            addView(list)
+        }
+        val title = if (shuffleQueueActive) {
+            "현재 큐 · ${mediaController.mediaItemCount}개 · 셔플"
+        } else {
+            "현재 큐 · ${mediaController.mediaItemCount}개"
+        }
+        val panel = panelContainer(title, compact = true).apply {
+            if (shuffleQueueActive) {
+                addView(panelNote("셔플 켜짐: 현재 영상은 유지하고 다음 큐를 섞었습니다."))
+            }
+            addView(scroll, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(280),
+            ))
+        }
+        showPanel(panel, widthDp = 360, gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL, bottomMarginDp = 96)
+    }
+
+    private fun stopPlaybackAndClose() {
+        val mediaController = controller ?: return
+        hidePanel()
+        mediaController.stop()
+        mediaController.clearMediaItems()
+        finish()
+    }
+
+    private fun panelContainer(title: String, compact: Boolean = false): LinearLayout {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(18), dp(22), dp(20))
+            setPadding(dp(18), dp(14), dp(18), dp(16))
             background = glassPanelBackground()
             addView(TextView(this@PlayerActivity).apply {
                 text = title
                 setTextColor(Color.WHITE)
-                textSize = 18f
+                textSize = if (compact) 15f else 18f
                 typeface = Typeface.DEFAULT_BOLD
                 includeFontPadding = false
-            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(34)))
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(if (compact) 28 else 34)))
+        }
+    }
+
+    private fun panelNote(message: String): View {
+        return TextView(this).apply {
+            text = message
+            setTextColor(Color.argb(190, 255, 255, 255))
+            textSize = 12f
+            includeFontPadding = false
+            setPadding(dp(2), dp(2), dp(2), dp(10))
         }
     }
 
@@ -787,11 +1060,11 @@ class PlayerActivity : Activity() {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(2), dp(12), dp(2), dp(12))
+            setPadding(dp(2), dp(9), dp(2), dp(9))
             addView(TextView(this@PlayerActivity).apply {
                 text = title
                 setTextColor(Color.WHITE)
-                textSize = 16f
+                textSize = 14f
                 typeface = Typeface.DEFAULT_BOLD
                 includeFontPadding = false
             })
@@ -805,18 +1078,25 @@ class PlayerActivity : Activity() {
         }
     }
 
-    private fun showPanel(panel: View) {
+    private fun showPanel(
+        panel: View,
+        widthDp: Int,
+        gravity: Int,
+        topMarginDp: Int = 0,
+        rightMarginDp: Int = 0,
+        bottomMarginDp: Int = 20,
+    ) {
         panelScrim.removeAllViews()
         panelScrim.addView(
             panel,
             FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
+                dp(widthDp),
                 FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM,
+                gravity,
             ).apply {
-                leftMargin = dp(18)
-                rightMargin = dp(18)
-                bottomMargin = dp(20)
+                topMargin = dp(topMarginDp)
+                rightMargin = dp(rightMarginDp)
+                bottomMargin = dp(bottomMarginDp)
             },
         )
         panelScrim.alpha = 0f
@@ -837,8 +1117,39 @@ class PlayerActivity : Activity() {
         val duration = mediaController.duration
         val target = (mediaController.currentPosition + deltaMs).coerceAtLeast(0L)
         mediaController.seekTo(if (duration > 0) target.coerceAtMost(duration) else target)
-        showHint(if (deltaMs > 0) "+10초" else "-10초")
+        val seconds = kotlin.math.abs(deltaMs / 1000L)
+        showHint(if (deltaMs > 0) "+${seconds}초" else "-${seconds}초")
         updateControls()
+    }
+
+    private fun queueAccumulatedSeek(direction: Int) {
+        if (pendingSeekDirection != 0 && pendingSeekDirection != direction) {
+            commitAccumulatedSeek()
+        }
+        pendingSeekDirection = direction
+        pendingSeekSteps += 1
+        handler.removeCallbacks(commitAccumulatedSeekRunnable)
+        handler.postDelayed(commitAccumulatedSeekRunnable, ACCUMULATED_SEEK_DELAY_MS)
+        val seconds = pendingSeekSteps * 10
+        showHint(if (direction > 0) "+${seconds}초" else "-${seconds}초")
+    }
+
+    private fun commitAccumulatedSeek() {
+        if (pendingSeekDirection == 0 || pendingSeekSteps <= 0) return
+        val deltaMs = pendingSeekDirection * pendingSeekSteps * 10_000L
+        pendingSeekDirection = 0
+        pendingSeekSteps = 0
+        seekRelative(deltaMs)
+    }
+
+    private fun finishHorizontalSeekDrag() {
+        if (!horizontalSeekDragging) return
+        if (horizontalSeekAccumulatedMs != 0L) {
+            seekRelative(horizontalSeekAccumulatedMs)
+        }
+        horizontalSeekDragging = false
+        horizontalSeekAccumulatedMs = 0L
+        scheduleHideControls()
     }
 
     private fun showHint(message: String) {
@@ -860,15 +1171,145 @@ class PlayerActivity : Activity() {
             showHint("재생 중인 영상이 없습니다")
             return
         }
+        enteringPip = true
+        hideChromeForPip()
+        updatePipParamsIfPossible()
+        handler.removeCallbacks(enterPipRunnable)
+        playerView.post {
+            hideChromeForPip()
+            playerView.invalidate()
+            window.decorView.invalidate()
+            handler.postDelayed(enterPipRunnable, PIP_ENTER_DELAY_MS)
+        }
+    }
+
+    private fun buildPipParams(): PictureInPictureParams {
+        val builder = PictureInPictureParams.Builder()
+            .setAspectRatio(Rational(16, 9))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                builder.setAutoEnterEnabled(false)
+            }
+            builder.setActions(
+                listOf(
+                    pipRemoteAction(
+                        ACTION_AUDIO_ONLY,
+                        R.drawable.ic_headphones,
+                        "오디오 전용",
+                        "화면을 닫고 소리만 재생",
+                        AUDIO_ONLY_REQUEST_CODE,
+                    ),
+                    pipRemoteAction(
+                        ACTION_PIP_PLAY_PAUSE,
+                        if (controller?.isPlaying == true) R.drawable.ic_pause else R.drawable.ic_play,
+                        if (controller?.isPlaying == true) "일시정지" else "재생",
+                        "재생 또는 일시정지",
+                        PIP_PLAY_PAUSE_REQUEST_CODE,
+                    ),
+                    pipRemoteAction(
+                        ACTION_PIP_NEXT,
+                        R.drawable.ic_skip_next,
+                        "다음",
+                        "다음 영상",
+                        PIP_NEXT_REQUEST_CODE,
+                    ),
+                ),
+            )
+        }
+        return builder.build()
+    }
+
+    private fun pipRemoteAction(
+        action: String,
+        iconRes: Int,
+        title: String,
+        description: String,
+        requestCode: Int,
+    ): RemoteAction {
+        val intent = Intent(this, PlayerActivity::class.java).apply {
+            this.action = action
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            requestCode,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        return RemoteAction(
+            Icon.createWithResource(this, iconRes),
+            title,
+            description,
+            pendingIntent,
+        )
+    }
+
+    private fun handlePipActionIntent(intent: Intent?): Boolean {
+        return when (intent?.action) {
+            ACTION_AUDIO_ONLY -> {
+                enteringPip = false
+                hideChromeForPipIfReady()
+                finish()
+                true
+            }
+            ACTION_PIP_PREVIOUS -> {
+                controller?.seekToPreviousMediaItem()
+                updateControlsIfReady()
+                true
+            }
+            ACTION_PIP_PLAY_PAUSE -> {
+                controller?.let { mediaController ->
+                    if (mediaController.isPlaying) {
+                        mediaController.pause()
+                    } else {
+                        mediaController.play()
+                    }
+                }
+                updateControlsIfReady()
+                true
+            }
+            ACTION_PIP_NEXT -> {
+                controller?.seekToNextMediaItem()
+                updateControlsIfReady()
+                true
+            }
+            else -> false
+        }
+    }
+
+    private fun updatePipParamsIfPossible() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !isFinishing && !isDestroyed) {
+            setPictureInPictureParams(buildPipParams())
+        }
+    }
+
+    private fun updateControlsIfReady() {
+        if (::titleText.isInitialized && ::centerPlayButton.isInitialized) {
+            updateControls()
+        }
+    }
+
+    private fun hideChromeForPipIfReady() {
+        if (::controls.isInitialized) {
+            hideChromeForPip()
+        }
+    }
+
+    private fun hideChromeForPip() {
+        handler.removeCallbacks(hideHintRunnable)
+        handler.removeCallbacks(hideControlsRunnable)
+        handler.removeCallbacks(hideUnlockOverlayRunnable)
+        controlsVisible = false
+        controls.animate().cancel()
+        controls.alpha = 0f
         controls.visibility = View.GONE
         panelScrim.visibility = View.GONE
+        panelScrim.removeAllViews()
         hintText.visibility = View.GONE
         overlay.visibility = View.GONE
         unlockOverlay.visibility = View.GONE
-        val params = PictureInPictureParams.Builder()
-            .setAspectRatio(Rational(16, 9))
-            .build()
-        enterPictureInPictureMode(params)
+        playerView.invalidate()
+        window.decorView.invalidate()
     }
 
     private fun updateControls() {
@@ -877,6 +1318,18 @@ class PlayerActivity : Activity() {
         titleText.text = current?.mediaMetadata?.title?.toString().orEmpty()
         centerPlayButton.icon = if (mediaController.isPlaying) ICON_PAUSE else ICON_PLAY
         centerPlayButton.invalidate()
+        if (::shuffleButton.isInitialized) {
+            shuffleButton.active = shuffleQueueActive
+            shuffleButton.invalidate()
+        }
+        if (::repeatButton.isInitialized) {
+            repeatButton.icon = when (mediaController.repeatMode) {
+                Player.REPEAT_MODE_ONE -> ICON_REPEAT_ONE
+                else -> ICON_REPEAT
+            }
+            repeatButton.active = mediaController.repeatMode != Player.REPEAT_MODE_OFF
+            repeatButton.invalidate()
+        }
         val duration = mediaController.duration.takeIf { it > 0 } ?: 0L
         val position = mediaController.currentPosition.coerceAtLeast(0L)
         positionText.text = formatTime(position)
@@ -888,7 +1341,7 @@ class PlayerActivity : Activity() {
     }
 
     private fun updateOverlay() {
-        if (inPip) return
+        if (inPip || enteringPip) return
         playbackErrorMessage?.let {
             showOverlay(it)
             return
@@ -911,8 +1364,26 @@ class PlayerActivity : Activity() {
     }
 
     private fun showOverlay(message: String) {
+        if (inPip || enteringPip) return
         overlayText.text = message
         overlay.visibility = View.VISIBLE
+    }
+
+    private fun repeatModeLabel(mode: Int): String {
+        return when (mode) {
+            Player.REPEAT_MODE_OFF -> "꺼짐"
+            Player.REPEAT_MODE_ONE -> "한 영상 반복"
+            Player.REPEAT_MODE_ALL -> "전체 반복"
+            else -> "꺼짐"
+        }
+    }
+
+    private fun repeatModeShortLabel(mode: Int): String {
+        return when (mode) {
+            Player.REPEAT_MODE_ONE -> "1"
+            Player.REPEAT_MODE_ALL -> "전체"
+            else -> "끔"
+        }
     }
 
     private fun hideOverlay() {
@@ -950,10 +1421,48 @@ class PlayerActivity : Activity() {
     }
 
     private inner class PlayerGestureListener : GestureDetector.SimpleOnGestureListener() {
-        override fun onDown(e: MotionEvent): Boolean = true
+        override fun onDown(e: MotionEvent): Boolean {
+            horizontalSeekDragging = false
+            horizontalSeekStartX = e.x
+            horizontalSeekAccumulatedMs = 0L
+            return true
+        }
+
+        override fun onScroll(
+            e1: MotionEvent?,
+            e2: MotionEvent,
+            distanceX: Float,
+            distanceY: Float,
+        ): Boolean {
+            if (locked || inPip) return true
+            val start = e1 ?: return true
+            val dx = e2.x - start.x
+            val dy = e2.y - start.y
+            if (!horizontalSeekDragging) {
+                if (kotlin.math.abs(dx) < dp(24) || kotlin.math.abs(dx) < kotlin.math.abs(dy) * 1.35f) {
+                    return true
+                }
+                horizontalSeekDragging = true
+                horizontalSeekStartX = start.x
+                setControlsVisible(true)
+            }
+            val nextMs = ((e2.x - horizontalSeekStartX) / dp(7).toFloat()).roundToInt() * 1000L
+            if (nextMs != horizontalSeekAccumulatedMs) {
+                horizontalSeekAccumulatedMs = nextMs
+                val seconds = kotlin.math.abs(horizontalSeekAccumulatedMs / 1000L)
+                showHint(
+                    when {
+                        horizontalSeekAccumulatedMs > 0 -> "+${seconds}초"
+                        horizontalSeekAccumulatedMs < 0 -> "-${seconds}초"
+                        else -> "0초"
+                    },
+                )
+            }
+            return true
+        }
 
         override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-            if (locked || inPip) return true
+            if (locked || inPip || horizontalSeekDragging) return true
             setControlsVisible(!controlsVisible)
             return true
         }
@@ -961,11 +1470,19 @@ class PlayerActivity : Activity() {
         override fun onDoubleTap(e: MotionEvent): Boolean {
             if (locked || inPip) return true
             if (e.x < playerView.width / 2f) {
-                seekRelative(-10_000L)
+                queueAccumulatedSeek(-1)
             } else {
-                seekRelative(10_000L)
+                queueAccumulatedSeek(1)
             }
             return true
+        }
+
+        override fun onSingleTapUp(e: MotionEvent): Boolean {
+            if (horizontalSeekDragging) {
+                finishHorizontalSeekDrag()
+                return true
+            }
+            return super.onSingleTapUp(e)
         }
     }
 
@@ -974,6 +1491,7 @@ class PlayerActivity : Activity() {
         var icon: Int,
         private val strong: Boolean = false,
     ) : View(context) {
+        var active: Boolean = false
         private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
         private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
@@ -996,8 +1514,18 @@ class PlayerActivity : Activity() {
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             val size = width.coerceAtMost(height).toFloat()
-            rect.set((width - size) / 2f, (height - size) / 2f, (width + size) / 2f, (height + size) / 2f)
-            fillPaint.color = if (strong) Color.argb(212, 18, 18, 20) else Color.argb(120, 18, 18, 20)
+            val strokeInset = strokePaint.strokeWidth / 2f + 1f
+            rect.set(
+                (width - size) / 2f + strokeInset,
+                (height - size) / 2f + strokeInset,
+                (width + size) / 2f - strokeInset,
+                (height + size) / 2f - strokeInset,
+            )
+            fillPaint.color = when {
+                active -> Color.argb(224, 50, 191, 94)
+                strong -> Color.argb(212, 18, 18, 20)
+                else -> Color.argb(120, 18, 18, 20)
+            }
             canvas.drawOval(rect, fillPaint)
             canvas.drawOval(rect, strokePaint)
             drawIcon(canvas, rect)
@@ -1007,7 +1535,8 @@ class PlayerActivity : Activity() {
             vectorDrawableRes(icon)?.let { resId ->
                 val drawable = context.getDrawable(resId)?.mutate() ?: return
                 drawable.setTint(Color.WHITE)
-                val inset = (area.width() * 0.28f).roundToInt()
+                val insetRatio = if (icon == ICON_RESIZE) 0.26f else 0.28f
+                val inset = (area.width() * insetRatio).roundToInt()
                 drawable.setBounds(
                     area.left.roundToInt() + inset,
                     area.top.roundToInt() + inset,
@@ -1083,7 +1612,33 @@ class PlayerActivity : Activity() {
                     iconPaint.style = Paint.Style.FILL
                     canvas.drawRoundRect(RectF(cx - s * 0.20f, cy - s * 0.02f, cx + s * 0.20f, cy + s * 0.24f), s * 0.045f, s * 0.045f, iconPaint)
                 }
+                ICON_SHUFFLE -> {
+                    iconPaint.style = Paint.Style.STROKE
+                    iconPaint.strokeWidth = s * 0.055f
+                    iconPaint.strokeCap = Paint.Cap.ROUND
+                    val leftX = cx - s * 0.28f
+                    val rightX = cx + s * 0.28f
+                    val topY = cy - s * 0.15f
+                    val bottomY = cy + s * 0.15f
+                    canvas.drawLine(leftX, topY, cx - s * 0.06f, topY, iconPaint)
+                    canvas.drawLine(cx - s * 0.06f, topY, cx + s * 0.08f, bottomY, iconPaint)
+                    canvas.drawLine(cx + s * 0.08f, bottomY, rightX, bottomY, iconPaint)
+                    canvas.drawLine(leftX, bottomY, cx - s * 0.06f, bottomY, iconPaint)
+                    canvas.drawLine(cx - s * 0.06f, bottomY, cx + s * 0.08f, topY, iconPaint)
+                    canvas.drawLine(cx + s * 0.08f, topY, rightX, topY, iconPaint)
+                    drawArrowHead(canvas, rightX, topY, s)
+                    drawArrowHead(canvas, rightX, bottomY, s)
+                }
             }
+        }
+
+        private fun drawArrowHead(canvas: Canvas, x: Float, y: Float, size: Float) {
+            val arrow = Path()
+            arrow.moveTo(x, y)
+            arrow.lineTo(x - size * 0.10f, y - size * 0.08f)
+            arrow.moveTo(x, y)
+            arrow.lineTo(x - size * 0.10f, y + size * 0.08f)
+            canvas.drawPath(arrow, iconPaint)
         }
 
         private fun vectorDrawableRes(icon: Int): Int? {
@@ -1092,6 +1647,11 @@ class PlayerActivity : Activity() {
                 ICON_UNLOCK -> R.drawable.ic_unlock
                 ICON_SWAP_CONTROLS -> R.drawable.ic_swap_horizontal
                 ICON_PIP -> R.drawable.ic_picture_in_picture
+                ICON_SHUFFLE -> R.drawable.ic_shuffle
+                ICON_QUEUE -> R.drawable.ic_queue
+                ICON_REPEAT -> R.drawable.ic_repeat
+                ICON_REPEAT_ONE -> R.drawable.ic_repeat_one
+                ICON_RESIZE -> R.drawable.ic_resize_mode
                 else -> null
             }
         }
@@ -1109,8 +1669,9 @@ class PlayerActivity : Activity() {
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             val centerY = height / 2f
-            val left = dp(2).toFloat()
-            val right = width - dp(2).toFloat()
+            val thumbRadius = dp(9).toFloat()
+            val left = thumbRadius + dp(2).toFloat()
+            val right = width - thumbRadius - dp(2).toFloat()
             val trackHeight = dp(7).toFloat()
             rect.set(left, centerY - trackHeight / 2f, right, centerY + trackHeight / 2f)
             paint.color = Color.argb(116, 255, 255, 255)
@@ -1120,7 +1681,7 @@ class PlayerActivity : Activity() {
             canvas.drawRoundRect(rect, trackHeight, trackHeight, paint)
             val thumbX = left + (right - left) * progress.coerceIn(0f, 1f)
             paint.color = Color.WHITE
-            canvas.drawRoundRect(RectF(thumbX - dp(5), centerY - dp(16), thumbX + dp(5), centerY + dp(16)), dp(5).toFloat(), dp(5).toFloat(), paint)
+            canvas.drawCircle(thumbX, centerY, thumbRadius, paint)
         }
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -1209,6 +1770,21 @@ class PlayerActivity : Activity() {
         private const val ICON_LOCK = 8
         private const val ICON_UNLOCK = 9
         private const val ICON_SWAP_CONTROLS = 10
+        private const val ICON_SHUFFLE = 11
+        private const val ICON_QUEUE = 12
+        private const val ICON_REPEAT = 13
+        private const val ICON_RESIZE = 14
+        private const val ICON_REPEAT_ONE = 15
+        private const val ACTION_AUDIO_ONLY = "com.example.drive_shuffle_player.action.AUDIO_ONLY"
+        private const val ACTION_PIP_PREVIOUS = "com.example.drive_shuffle_player.action.PIP_PREVIOUS"
+        private const val ACTION_PIP_PLAY_PAUSE = "com.example.drive_shuffle_player.action.PIP_PLAY_PAUSE"
+        private const val ACTION_PIP_NEXT = "com.example.drive_shuffle_player.action.PIP_NEXT"
+        private const val AUDIO_ONLY_REQUEST_CODE = 4102
+        private const val PIP_PREVIOUS_REQUEST_CODE = 4103
+        private const val PIP_PLAY_PAUSE_REQUEST_CODE = 4104
+        private const val PIP_NEXT_REQUEST_CODE = 4105
+        private const val PIP_ENTER_DELAY_MS = 180L
+        private const val ACCUMULATED_SEEK_DELAY_MS = 350L
     }
 }
 
