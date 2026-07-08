@@ -87,6 +87,7 @@ class PlayerActivity : Activity() {
     private var pendingSeekDirection = 0
     private var pendingSeekSteps = 0
     private var horizontalSeekDragging = false
+    private var horizontalSeekAllowed = false
     private var horizontalSeekStartX = 0f
     private var horizontalSeekAccumulatedMs = 0L
     private var queueBeforeShuffle: List<MediaItem>? = null
@@ -422,7 +423,7 @@ class PlayerActivity : Activity() {
             setPadding(dp(18), 0, dp(18), 0)
             addView(positionText, LinearLayout.LayoutParams(dp(70), LinearLayout.LayoutParams.WRAP_CONTENT))
             addView(space(10))
-            addView(progressView, LinearLayout.LayoutParams(0, dp(36), 1f))
+            addView(progressView, LinearLayout.LayoutParams(0, dp(44), 1f))
             addView(space(10))
             addView(durationText, LinearLayout.LayoutParams(dp(70), LinearLayout.LayoutParams.WRAP_CONTENT))
         }
@@ -1423,6 +1424,7 @@ class PlayerActivity : Activity() {
     private inner class PlayerGestureListener : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent): Boolean {
             horizontalSeekDragging = false
+            horizontalSeekAllowed = isHorizontalSeekArea(e.x)
             horizontalSeekStartX = e.x
             horizontalSeekAccumulatedMs = 0L
             return true
@@ -1435,6 +1437,7 @@ class PlayerActivity : Activity() {
             distanceY: Float,
         ): Boolean {
             if (locked || inPip) return true
+            if (!horizontalSeekAllowed) return true
             val start = e1 ?: return true
             val dx = e2.x - start.x
             val dy = e2.y - start.y
@@ -1484,6 +1487,12 @@ class PlayerActivity : Activity() {
             }
             return super.onSingleTapUp(e)
         }
+    }
+
+    private fun isHorizontalSeekArea(x: Float): Boolean {
+        val width = playerView.width.takeIf { it > 0 } ?: return false
+        val edgeWidth = width / 6f
+        return x >= edgeWidth && x <= width - edgeWidth
     }
 
     private inner class IconGlassButton(
@@ -1666,6 +1675,11 @@ class PlayerActivity : Activity() {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         private val rect = RectF()
 
+        init {
+            isClickable = true
+            isFocusable = true
+        }
+
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             val centerY = height / 2f
@@ -1686,29 +1700,39 @@ class PlayerActivity : Activity() {
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
             if (locked || inPip) return true
-            val fraction = (event.x / width.toFloat()).coerceIn(0f, 1f)
+            parent?.requestDisallowInterceptTouchEvent(true)
+            val fraction = seekFractionFor(event.x)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     onSeekStarted?.invoke()
-                    progress = fraction
-                    invalidate()
+                    applySeekFraction(fraction)
                     return true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    progress = fraction
-                    invalidate()
-                    onSeekChanged?.invoke(fraction)
+                    applySeekFraction(fraction)
                     return true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    progress = fraction
-                    invalidate()
-                    onSeekChanged?.invoke(fraction)
+                    applySeekFraction(fraction)
                     onSeekFinished?.invoke()
                     return true
                 }
             }
             return true
+        }
+
+        private fun seekFractionFor(x: Float): Float {
+            val thumbRadius = dp(9).toFloat()
+            val left = thumbRadius + dp(2).toFloat()
+            val right = width - thumbRadius - dp(2).toFloat()
+            val usableWidth = (right - left).coerceAtLeast(1f)
+            return ((x - left) / usableWidth).coerceIn(0f, 1f)
+        }
+
+        private fun applySeekFraction(fraction: Float) {
+            progress = fraction
+            invalidate()
+            onSeekChanged?.invoke(fraction)
         }
     }
 

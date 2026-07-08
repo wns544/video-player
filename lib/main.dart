@@ -791,6 +791,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _searchActive = false;
   bool _refreshingDriveToken = false;
   bool _syncingCloudQueue = false;
+  bool _driveReconnectDialogOpen = false;
   String? _lastGoogleEmail;
   bool _driveAuthExpired = false;
   bool _initializing = true;
@@ -1134,7 +1135,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _lastLocalPlaybackQueueUpdatedAt = DateTime.now();
   }
 
-  Future<void> _syncPlaybackQueueFromDrive() async {
+  Future<void> _syncPlaybackQueueFromDrive({bool force = false}) async {
     if (_syncingCloudQueue || _accessToken == null || _accessToken!.isEmpty) {
       return;
     }
@@ -1146,11 +1147,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final response = await _driveRequestWithAuth((token) {
         return http
             .get(
-              Uri.https(
-                'www.googleapis.com',
-                '/drive/v3/files/$fileId',
-                {'alt': 'media'},
-              ),
+              Uri.https('www.googleapis.com', '/drive/v3/files/$fileId', {
+                'alt': 'media',
+              }),
               headers: {'Authorization': 'Bearer $token'},
             )
             .timeout(const Duration(seconds: 12));
@@ -1162,7 +1161,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
       final localUpdatedAt = _lastLocalPlaybackQueueUpdatedAt;
       if (cloudUpdatedAt == null ||
-          (localUpdatedAt != null && !cloudUpdatedAt.isAfter(localUpdatedAt))) {
+          (!force &&
+              localUpdatedAt != null &&
+              !cloudUpdatedAt.isAfter(localUpdatedAt))) {
         return;
       }
       final queueItems = (cloud['queueItems'] as List? ?? const [])
@@ -1382,14 +1383,65 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _signInWithGoogle() async {
     await _guarded(() async {
+      await _connectDriveWithPrompt(forceCloudQueueSync: true);
+    });
+  }
+
+  Future<bool> _connectDriveWithPrompt({
+    bool forceCloudQueueSync = false,
+  }) async {
+    try {
       final existingUser = _user;
       if (existingUser != null) {
         await _authorizeDriveForUser(existingUser, promptIfNecessary: true);
-        return;
+      } else {
+        final user = await _signIn.authenticate(scopeHint: _driveScopes);
+        await _setUser(user, promptIfNecessary: true);
       }
-      final user = await _signIn.authenticate(scopeHint: _driveScopes);
-      await _setUser(user, promptIfNecessary: true);
-    });
+      final connected = _accessToken != null && _accessToken!.isNotEmpty;
+      if (connected && forceCloudQueueSync) {
+        await _syncPlaybackQueueFromDrive(force: true);
+      }
+      return connected;
+    } catch (error) {
+      if (mounted) {
+        final message = error.toString();
+        _showMessage(message);
+        setState(() => _status = message);
+      }
+      return false;
+    }
+  }
+
+  Future<bool> _promptDriveReconnect({bool forceCloudQueueSync = false}) async {
+    if (!mounted) return false;
+    if (_driveReconnectDialogOpen) return false;
+    _driveReconnectDialogOpen = true;
+    try {
+      final shouldReconnect = await showDialog<bool>(
+        context: context,
+        barrierDismissible: true,
+        builder: (context) => AlertDialog(
+          title: Text(t.drivePermissionExpired),
+          content: Text(t.reconnectDrivePrompt),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: Text(MaterialLocalizations.of(context).cancelButtonLabel),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.pop(context, true),
+              icon: const Icon(Icons.link),
+              label: Text(t.reconnect),
+            ),
+          ],
+        ),
+      );
+      if (shouldReconnect != true) return false;
+      return _connectDriveWithPrompt(forceCloudQueueSync: forceCloudQueueSync);
+    } finally {
+      _driveReconnectDialogOpen = false;
+    }
   }
 
   Future<void> _switchGoogleAccount() async {
@@ -1578,15 +1630,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return items.isEmpty ? null : items.first;
   }
 
-  Future<bool> _ensureDriveReady() async {
+  Future<bool> _ensureDriveReady({
+    bool promptIfNeeded = true,
+    bool syncCloudQueueOnReconnect = false,
+  }) async {
     var user = _user;
     if (user == null) {
       final message = _lastGoogleEmail == null
           ? t.driveSignInRequired
           : t.reconnectDrivePrompt;
-      _showMessage(message);
       setState(() => _status = message);
-      return false;
+      if (!promptIfNeeded) {
+        _showMessage(message);
+        return false;
+      }
+      return _promptDriveReconnect(
+        forceCloudQueueSync: syncCloudQueueOnReconnect,
+      );
     }
 
     final headers = await user.authorizationClient.authorizationHeaders(
@@ -1595,13 +1655,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
     final authorization = headers?['Authorization'];
     if (authorization == null) {
-      _showMessage(t.reconnectDrivePrompt);
       setState(() {
         _driveAuthExpired = true;
         _status = t.drivePermissionExpired;
       });
       await _saveLibraryState();
-      return false;
+      if (!promptIfNeeded) {
+        _showMessage(t.reconnectDrivePrompt);
+        return false;
+      }
+      return _promptDriveReconnect(
+        forceCloudQueueSync: syncCloudQueueOnReconnect,
+      );
     }
     setState(() {
       _user = user;
@@ -1611,6 +1676,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _status = t.connectedAccount(user.email);
     });
     await _saveLibraryState();
+    if (syncCloudQueueOnReconnect) {
+      await _syncPlaybackQueueFromDrive(force: true);
+    }
     return true;
   }
 
@@ -1690,7 +1758,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
     _lastDriveReconnectPromptAt = now;
-    _showMessage(t.reconnectDrivePrompt);
+    unawaited(_promptDriveReconnect(forceCloudQueueSync: true));
   }
 
   Future<void> _updateNativeAccessToken({bool retry = false}) async {
@@ -2001,6 +2069,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _playLastVideo() async {
+    if (!await _syncCloudQueueBeforeResumeIfNeeded()) return;
     final summary = _playbackSummary;
     if (summary != null && summary.queue.isNotEmpty) {
       await _startPlayback(
@@ -2016,6 +2085,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
     await _playSingleItem(item);
+  }
+
+  Future<bool> _syncCloudQueueBeforeResumeIfNeeded() async {
+    final summary = _playbackSummary;
+    final shouldCheckDriveQueue =
+        _driveAuthExpired ||
+        _lastGoogleEmail != null ||
+        (summary?.queue.any((item) => item.source == VideoSource.drive) ??
+            false);
+    if (!shouldCheckDriveQueue) return true;
+    final ready = await _ensureDriveReady(
+      promptIfNeeded: true,
+      syncCloudQueueOnReconnect: true,
+    );
+    if (!ready) return false;
+    await _syncPlaybackQueueFromDrive(force: true);
+    return true;
   }
 
   Future<void> _startPlayback(
@@ -2128,6 +2214,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _openPlayerFromMini() async {
     await _guarded(() async {
+      if (!await _syncCloudQueueBeforeResumeIfNeeded()) return;
       if (_playbackSummary?.current == null) {
         _showMessage(t.noVideosToPlay);
         return;
@@ -4680,7 +4767,7 @@ class _EmptyTab extends StatelessWidget {
   }
 }
 
-class _MiniPlayer extends StatelessWidget {
+class _MiniPlayer extends StatefulWidget {
   const _MiniPlayer({
     required this.item,
     required this.showLivePreview,
@@ -4708,90 +4795,111 @@ class _MiniPlayer extends StatelessWidget {
   final VoidCallback? onStop;
 
   @override
+  State<_MiniPlayer> createState() => _MiniPlayerState();
+}
+
+class _MiniPlayerState extends State<_MiniPlayer> {
+  bool _pressed = false;
+
+  @override
   Widget build(BuildContext context) {
-    final progress = durationMs <= 0
+    final progress = widget.durationMs <= 0
         ? 0.0
-        : (positionMs / durationMs).clamp(0.0, 1.0);
+        : (widget.positionMs / widget.durationMs).clamp(0.0, 1.0);
     return Material(
       color: _Ui.card,
       elevation: 8,
       shadowColor: Colors.black.withValues(alpha: 0.12),
       child: InkWell(
-        onTap: onOpen,
+        onTap: widget.onOpen,
+        onHighlightChanged: (value) {
+          if (_pressed == value) return;
+          setState(() => _pressed = value);
+        },
+        splashColor: _Ui.accent.withValues(alpha: 0.10),
+        highlightColor: Colors.transparent,
         child: SafeArea(
           top: false,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              LinearProgressIndicator(
-                value: progress,
-                minHeight: 2.5,
-                backgroundColor: _Ui.surface2,
-                color: _Ui.accent,
-              ),
-              SizedBox(
-                height: 60,
-                child: Row(
-                  children: [
-                    const SizedBox(width: 10),
-                    _MiniPreview(item: item, showLivePreview: showLivePreview),
-                    const SizedBox(width: 9),
-                    Expanded(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            item.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: _Ui.text,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            positionMs > 0
-                                ? '${_formatDuration(positionMs)} ${strings.resume}'
-                                : item.source == VideoSource.drive
-                                ? 'Google Drive'
-                                : strings.local,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: _Ui.accent,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    _MiniCircleButton(
-                      icon: isPlaying ? Icons.pause : Icons.play_arrow,
-                      onPressed: onPlayPause,
-                    ),
-                    IconButton(
-                      tooltip: strings.currentQueue,
-                      onPressed: onQueue,
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints.tightFor(
-                        width: 34,
-                        height: 34,
-                      ),
-                      icon: Icon(
-                        Icons.queue_music,
-                        size: 19,
-                        color: onQueue == null ? _Ui.text3 : _Ui.text2,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                  ],
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 90),
+            curve: Curves.easeOut,
+            color: _pressed ? _Ui.accent.withValues(alpha: 0.08) : _Ui.card,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                LinearProgressIndicator(
+                  value: progress,
+                  minHeight: 2.5,
+                  backgroundColor: _Ui.surface2,
+                  color: _pressed ? _Ui.accentDark : _Ui.accent,
                 ),
-              ),
-            ],
+                SizedBox(
+                  height: 60,
+                  child: Row(
+                    children: [
+                      const SizedBox(width: 10),
+                      _MiniPreview(
+                        item: widget.item,
+                        showLivePreview: widget.showLivePreview,
+                      ),
+                      const SizedBox(width: 9),
+                      Expanded(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              widget.item.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: _Ui.text,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              widget.positionMs > 0
+                                  ? '${_formatDuration(widget.positionMs)} ${widget.strings.resume}'
+                                  : widget.item.source == VideoSource.drive
+                                  ? 'Google Drive'
+                                  : widget.strings.local,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: _Ui.accent,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      _MiniCircleButton(
+                        icon: widget.isPlaying ? Icons.pause : Icons.play_arrow,
+                        onPressed: widget.onPlayPause,
+                      ),
+                      IconButton(
+                        tooltip: widget.strings.currentQueue,
+                        onPressed: widget.onQueue,
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints.tightFor(
+                          width: 34,
+                          height: 34,
+                        ),
+                        icon: Icon(
+                          Icons.queue_music,
+                          size: 19,
+                          color: widget.onQueue == null ? _Ui.text3 : _Ui.text2,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
