@@ -22,6 +22,7 @@ const _serverClientId =
 const _driveFolderMimeType = 'application/vnd.google-apps.folder';
 const _prefsVideosKey = 'library_videos';
 const _prefsPlaylistsKey = 'playlists';
+const _prefsDriveFoldersKey = 'drive_folders';
 const _prefsRecentIdsKey = 'recent_video_ids';
 const _prefsTabKey = 'library_tab';
 const _prefsSortKey = 'sort_mode';
@@ -185,7 +186,7 @@ class DriveShuffleApp extends StatelessWidget {
 
 enum VideoSource { local, drive }
 
-enum LibraryTab { all, local, drive, playlist, recent }
+enum LibraryTab { folders, playlist, drive, recent, all }
 
 enum VideoSortMode {
   recentlyAdded,
@@ -414,11 +415,11 @@ class AppStrings {
 
 extension on LibraryTab {
   IconData get icon => switch (this) {
-    LibraryTab.all => Icons.video_library_outlined,
-    LibraryTab.local => Icons.folder_open_outlined,
-    LibraryTab.drive => Icons.cloud_outlined,
+    LibraryTab.folders => Icons.folder_outlined,
     LibraryTab.playlist => Icons.queue_music_outlined,
+    LibraryTab.drive => Icons.cloud_outlined,
     LibraryTab.recent => Icons.history,
+    LibraryTab.all => Icons.video_library_outlined,
   };
 }
 
@@ -594,6 +595,81 @@ class VideoPlaylist {
   };
 }
 
+class DriveFolderLibrary {
+  const DriveFolderLibrary({
+    required this.id,
+    required this.driveFolderId,
+    required this.name,
+    required this.playlistId,
+    required this.videoIds,
+    required this.createdAt,
+    required this.updatedAt,
+    this.lastSyncedAt,
+    this.syncState = '',
+  });
+
+  factory DriveFolderLibrary.fromJson(Map<String, Object?> json) {
+    return DriveFolderLibrary(
+      id: json['id'] as String,
+      driveFolderId: json['driveFolderId'] as String? ?? '',
+      name: json['name'] as String? ?? 'Drive folder',
+      playlistId: json['playlistId'] as String? ?? '',
+      videoIds: (json['videoIds'] as List<Object?>? ?? const []).cast<String>(),
+      createdAt:
+          DateTime.tryParse(json['createdAt'] as String? ?? '') ??
+          DateTime.now(),
+      updatedAt:
+          DateTime.tryParse(json['updatedAt'] as String? ?? '') ??
+          DateTime.now(),
+      lastSyncedAt: DateTime.tryParse(json['lastSyncedAt'] as String? ?? ''),
+      syncState: json['syncState'] as String? ?? '',
+    );
+  }
+
+  final String id;
+  final String driveFolderId;
+  final String name;
+  final String playlistId;
+  final List<String> videoIds;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+  final DateTime? lastSyncedAt;
+  final String syncState;
+
+  DriveFolderLibrary copyWith({
+    String? name,
+    String? playlistId,
+    List<String>? videoIds,
+    DateTime? updatedAt,
+    DateTime? lastSyncedAt,
+    String? syncState,
+  }) {
+    return DriveFolderLibrary(
+      id: id,
+      driveFolderId: driveFolderId,
+      name: name ?? this.name,
+      playlistId: playlistId ?? this.playlistId,
+      videoIds: videoIds ?? this.videoIds,
+      createdAt: createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      lastSyncedAt: lastSyncedAt ?? this.lastSyncedAt,
+      syncState: syncState ?? this.syncState,
+    );
+  }
+
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'driveFolderId': driveFolderId,
+    'name': name,
+    'playlistId': playlistId,
+    'videoIds': videoIds,
+    'createdAt': createdAt.toIso8601String(),
+    'updatedAt': updatedAt.toIso8601String(),
+    'lastSyncedAt': lastSyncedAt?.toIso8601String(),
+    'syncState': syncState,
+  };
+}
+
 class PlaybackStateSummary {
   const PlaybackStateSummary({
     required this.queue,
@@ -716,6 +792,7 @@ class DriveImportResult {
     required this.foldersScanned,
     required this.videosFound,
     required this.createPlaylist,
+    this.sourceFolderId,
   });
 
   factory DriveImportResult.singleVideo(DriveEntry entry) {
@@ -725,6 +802,7 @@ class DriveImportResult {
       foldersScanned: 0,
       videosFound: 1,
       createPlaylist: false,
+      sourceFolderId: null,
     );
   }
 
@@ -733,6 +811,7 @@ class DriveImportResult {
   final int foldersScanned;
   final int videosFound;
   final bool createPlaylist;
+  final String? sourceFolderId;
 }
 
 class DriveImportProgress {
@@ -776,11 +855,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String? _accessToken;
   final List<VideoItem> _videos = [];
   final List<VideoPlaylist> _playlists = [];
+  final List<DriveFolderLibrary> _driveFolders = [];
   final List<String> _recentIds = [];
   final Set<String> _selectedIds = {};
   PlaybackStateSummary? _playbackSummary;
-  LibraryTab _selectedTab = LibraryTab.all;
+  LibraryTab _selectedTab = LibraryTab.folders;
   String? _selectedPlaylistId;
+  String? _selectedDriveFolderId;
   VideoSortMode _sortMode = VideoSortMode.recentlyAdded;
   LibraryViewMode _portraitViewMode = LibraryViewMode.list;
   LibraryViewMode _landscapeViewMode = LibraryViewMode.grid;
@@ -791,6 +872,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _searchActive = false;
   bool _refreshingDriveToken = false;
   bool _syncingCloudQueue = false;
+  bool _syncingDriveFolders = false;
   bool _driveReconnectDialogOpen = false;
   String? _lastGoogleEmail;
   bool _driveAuthExpired = false;
@@ -804,11 +886,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   static const _driveReconnectPromptCooldown = Duration(seconds: 60);
 
   String _tabLabel(LibraryTab tab) => switch (tab) {
-    LibraryTab.all => t.all,
-    LibraryTab.local => t.local,
-    LibraryTab.drive => t.drive,
+    LibraryTab.folders => '폴더',
     LibraryTab.playlist => t.playlist,
+    LibraryTab.drive => t.drive,
     LibraryTab.recent => t.recent,
+    LibraryTab.all => t.all,
   };
 
   VideoItem? get _lastPlaybackCandidate {
@@ -862,6 +944,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final prefs = await SharedPreferences.getInstance();
     final videosJson = prefs.getString(_prefsVideosKey);
     final playlistsJson = prefs.getString(_prefsPlaylistsKey);
+    final driveFoldersJson = prefs.getString(_prefsDriveFoldersKey);
     final recentIds = prefs.getStringList(_prefsRecentIdsKey) ?? const [];
     final tabName = prefs.getString(_prefsTabKey);
     final sortName = prefs.getString(_prefsSortKey);
@@ -893,13 +976,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             decoded.cast<Map<String, Object?>>().map(VideoPlaylist.fromJson),
           );
       }
+      if (driveFoldersJson != null && driveFoldersJson.isNotEmpty) {
+        final decoded = jsonDecode(driveFoldersJson) as List<Object?>;
+        _driveFolders
+          ..clear()
+          ..addAll(
+            decoded
+                .cast<Map<String, Object?>>()
+                .map(DriveFolderLibrary.fromJson)
+                .where((folder) => folder.driveFolderId.isNotEmpty),
+          );
+      }
       _recentIds
         ..clear()
         ..addAll(recentIds);
       _selectedTab = LibraryTab.values.firstWhere(
         (tab) => tab.name == tabName,
-        orElse: () => LibraryTab.all,
+        orElse: () => LibraryTab.folders,
       );
+      _selectedTab = LibraryTab.folders;
       _sortMode = VideoSortMode.values.firstWhere(
         (mode) => mode.name == sortName,
         orElse: () => VideoSortMode.recentlyAdded,
@@ -958,6 +1053,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await prefs.setString(
       _prefsPlaylistsKey,
       jsonEncode(_playlists.map((item) => item.toJson()).toList()),
+    );
+    await prefs.setString(
+      _prefsDriveFoldersKey,
+      jsonEncode(_driveFolders.map((item) => item.toJson()).toList()),
     );
     await prefs.setStringList(_prefsRecentIdsKey, _recentIds);
     await prefs.setString(_prefsTabKey, _selectedTab.name);
@@ -1481,6 +1580,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await _saveLibraryState();
       if (token != null && token.isNotEmpty) {
         unawaited(_syncPlaybackQueueFromDrive());
+        unawaited(_syncDriveFoldersOnStartup());
       }
       return;
     }
@@ -1510,6 +1610,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await _saveLibraryState();
     if (authorization != null && authorization.isNotEmpty) {
       unawaited(_syncPlaybackQueueFromDrive());
+      unawaited(_syncDriveFoldersOnStartup());
     }
   }
 
@@ -1532,7 +1633,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final duplicates = result.videosFound - added;
       VideoPlaylist? createdPlaylist;
       final playlistItems = _uniqueItemsForPlaylist(result.items);
-      if (result.createPlaylist && playlistItems.isNotEmpty) {
+      DriveFolderLibrary? importedFolder;
+      if (result.sourceFolderId != null && playlistItems.isNotEmpty) {
+        importedFolder = _upsertDriveFolderFromImport(
+          driveFolderId: result.sourceFolderId!,
+          name: result.sourceName.isNotEmpty
+              ? result.sourceName
+              : _importPlaylistName(t.driveImport),
+          items: playlistItems,
+        );
+        createdPlaylist = _playlistById(importedFolder.playlistId);
+      } else if (result.createPlaylist && playlistItems.isNotEmpty) {
         createdPlaylist = _createPlaylistFromItems(
           name: result.sourceName.isNotEmpty
               ? result.sourceName
@@ -1543,7 +1654,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       await _saveLibraryState();
       setState(() {
-        if (createdPlaylist != null) {
+        if (importedFolder != null) {
+          _selectedTab = LibraryTab.folders;
+          _selectedDriveFolderId = importedFolder.id;
+          _selectedPlaylistId = null;
+        } else if (createdPlaylist != null) {
           _selectedTab = LibraryTab.playlist;
           _selectedPlaylistId = createdPlaylist.id;
         } else {
@@ -1614,7 +1729,88 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   VideoPlaylist? get _selectedPlaylist {
     final id = _selectedPlaylistId;
     if (id == null) return null;
+    return _playlistById(id);
+  }
+
+  VideoPlaylist? _playlistById(String id) {
     return _playlists.where((playlist) => playlist.id == id).firstOrNull;
+  }
+
+  DriveFolderLibrary? get _selectedDriveFolder {
+    final id = _selectedDriveFolderId;
+    if (id == null) return null;
+    return _driveFolders.where((folder) => folder.id == id).firstOrNull;
+  }
+
+  DriveFolderLibrary _upsertDriveFolderFromImport({
+    required String driveFolderId,
+    required String name,
+    required List<VideoItem> items,
+  }) {
+    final now = DateTime.now();
+    final itemIds = items.map((item) => item.id).toList();
+    final existingIndex = _driveFolders.indexWhere(
+      (folder) => folder.driveFolderId == driveFolderId,
+    );
+    if (existingIndex >= 0) {
+      final existing = _driveFolders[existingIndex];
+      final nextIds = [...existing.videoIds];
+      for (final id in itemIds) {
+        if (!nextIds.contains(id)) nextIds.add(id);
+      }
+      final playlist = _playlistById(existing.playlistId);
+      String playlistId = existing.playlistId;
+      if (playlist == null) {
+        playlistId = _createPlaylistFromItems(
+          name: name,
+          sourceLabel: 'Google Drive',
+          items: items,
+        ).id;
+      } else {
+        final playlistIds = [...playlist.videoIds];
+        for (final id in itemIds) {
+          if (!playlistIds.contains(id)) playlistIds.add(id);
+        }
+        final playlistIndex = _playlists.indexWhere(
+          (entry) => entry.id == playlist.id,
+        );
+        if (playlistIndex >= 0) {
+          _playlists[playlistIndex] = playlist.copyWith(
+            name: playlist.name.isEmpty ? name : playlist.name,
+            videoIds: playlistIds,
+            updatedAt: now,
+          );
+        }
+      }
+      final updated = existing.copyWith(
+        name: name,
+        playlistId: playlistId,
+        videoIds: nextIds,
+        updatedAt: now,
+        lastSyncedAt: now,
+        syncState: '',
+      );
+      _driveFolders[existingIndex] = updated;
+      return updated;
+    }
+
+    final playlist = _createPlaylistFromItems(
+      name: name,
+      sourceLabel: 'Google Drive',
+      items: items,
+    );
+    final folder = DriveFolderLibrary(
+      id: 'driveFolder:${now.microsecondsSinceEpoch}:${_random.nextInt(999999)}',
+      driveFolderId: driveFolderId,
+      name: name.trim().isEmpty ? 'Drive folder' : name.trim(),
+      playlistId: playlist.id,
+      videoIds: itemIds,
+      createdAt: now,
+      updatedAt: now,
+      lastSyncedAt: now,
+    );
+    _driveFolders.insert(0, folder);
+    return folder;
   }
 
   List<VideoItem> _videosForPlaylist(VideoPlaylist playlist) {
@@ -1623,6 +1819,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         .map((id) => byId[id])
         .whereType<VideoItem>()
         .toList();
+  }
+
+  List<VideoItem> _videosForDriveFolder(DriveFolderLibrary folder) {
+    final byId = {for (final item in _videos) item.id: item};
+    return folder.videoIds
+        .map((id) => byId[id])
+        .whereType<VideoItem>()
+        .toList();
+  }
+
+  VideoItem? _coverForDriveFolder(DriveFolderLibrary folder) {
+    final items = _videosForDriveFolder(folder);
+    return items.isEmpty ? null : items.first;
   }
 
   VideoItem? _coverForPlaylist(VideoPlaylist playlist) {
@@ -1860,6 +2069,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       foldersScanned: foldersScanned,
       videosFound: videos.length,
       createPlaylist: true,
+      sourceFolderId: folderId,
     );
   }
 
@@ -2028,6 +2238,99 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
     }
     await _saveLibraryState();
+  }
+
+  Future<void> _syncDriveFoldersOnStartup() async {
+    if (_driveFolders.isEmpty || _syncingDriveFolders) return;
+    if (!await _ensureDriveReady(promptIfNeeded: false)) return;
+    _syncingDriveFolders = true;
+    try {
+      for (final folder in List<DriveFolderLibrary>.from(_driveFolders)) {
+        if (!mounted) return;
+        await _refreshDriveFolder(folder, showMessages: false);
+      }
+    } finally {
+      _syncingDriveFolders = false;
+    }
+  }
+
+  Future<void> _refreshDriveFolder(
+    DriveFolderLibrary folder, {
+    bool showMessages = true,
+  }) async {
+    if (!await _ensureDriveReady(promptIfNeeded: showMessages)) return;
+    final folderIndex = _driveFolders.indexWhere(
+      (entry) => entry.id == folder.id,
+    );
+    if (folderIndex < 0) return;
+    setState(() {
+      _driveFolders[folderIndex] = _driveFolders[folderIndex].copyWith(
+        syncState: 'syncing',
+      );
+      _status = '${folder.name}: Drive 동기화 중...';
+    });
+    try {
+      final result = await _collectDriveVideosRecursively(
+        folder.driveFolderId,
+        folder.name,
+        (_) {},
+      );
+      final addedItems = _addUniqueVideos(result.items);
+      final knownIds = _driveFolders[folderIndex].videoIds.toSet();
+      final nextFolderIds = [..._driveFolders[folderIndex].videoIds];
+      for (final item in result.items) {
+        if (knownIds.add(item.id)) nextFolderIds.add(item.id);
+      }
+      final playlist = _playlistById(_driveFolders[folderIndex].playlistId);
+      if (playlist != null) {
+        final playlistIds = [...playlist.videoIds];
+        for (final id in nextFolderIds) {
+          if (!playlistIds.contains(id)) playlistIds.add(id);
+        }
+        final playlistIndex = _playlists.indexWhere(
+          (entry) => entry.id == playlist.id,
+        );
+        if (playlistIndex >= 0) {
+          _playlists[playlistIndex] = playlist.copyWith(
+            videoIds: playlistIds,
+            updatedAt: DateTime.now(),
+          );
+        }
+      }
+      setState(() {
+        final index = _driveFolders.indexWhere(
+          (entry) => entry.id == folder.id,
+        );
+        if (index >= 0) {
+          _driveFolders[index] = _driveFolders[index].copyWith(
+            videoIds: nextFolderIds,
+            updatedAt: DateTime.now(),
+            lastSyncedAt: DateTime.now(),
+            syncState: '',
+          );
+        }
+        _status = addedItems.isEmpty
+            ? '${folder.name}: 새 영상 없음'
+            : '${folder.name}: 새 영상 ${addedItems.length}개 추가';
+      });
+      await _saveLibraryState();
+      unawaited(_hydrateDriveThumbnails(addedItems));
+      if (showMessages) _showMessage(_status);
+    } catch (error) {
+      setState(() {
+        final index = _driveFolders.indexWhere(
+          (entry) => entry.id == folder.id,
+        );
+        if (index >= 0) {
+          _driveFolders[index] = _driveFolders[index].copyWith(
+            syncState: 'failed',
+          );
+        }
+        _status = '${folder.name}: 동기화 실패';
+      });
+      if (showMessages) _showMessage(error.toString());
+      await _saveLibraryState();
+    }
   }
 
   Future<void> _playVisibleShuffled() async {
@@ -2426,6 +2729,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _videos.removeWhere((item) => removingIds.contains(item.id));
       _recentIds.removeWhere(removingIds.contains);
       _removeVideoIdsFromPlaylists(removingIds);
+      _removeVideoIdsFromDriveFolders(removingIds);
       final summary = _playbackSummary;
       if (summary != null) {
         final nextQueue = summary.queue
@@ -2455,6 +2759,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _videos.removeWhere((candidate) => candidate.id == item.id);
       _recentIds.remove(item.id);
       _removeVideoIdsFromPlaylists({item.id});
+      _removeVideoIdsFromDriveFolders({item.id});
       final summary = _playbackSummary;
       if (summary != null) {
         final nextQueue = summary.queue
@@ -2646,14 +2951,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+  void _removeVideoIdsFromDriveFolders(Set<String> ids) {
+    for (var index = 0; index < _driveFolders.length; index++) {
+      final folder = _driveFolders[index];
+      final nextIds = folder.videoIds.where((id) => !ids.contains(id)).toList();
+      if (nextIds.length != folder.videoIds.length) {
+        _driveFolders[index] = folder.copyWith(
+          videoIds: nextIds,
+          updatedAt: DateTime.now(),
+        );
+      }
+    }
+  }
+
   void _clearPlaylist() {
     setState(() {
       _videos.clear();
       _playlists.clear();
+      _driveFolders.clear();
       _recentIds.clear();
       _playbackSummary = null;
       _selectedIds.clear();
       _selectedPlaylistId = null;
+      _selectedDriveFolderId = null;
       _status = t.playlistCleared;
     });
     unawaited(_saveLibraryState());
@@ -2948,6 +3268,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (nextTab != LibraryTab.playlist) {
         _selectedPlaylistId = null;
       }
+      if (nextTab != LibraryTab.folders) {
+        _selectedDriveFolderId = null;
+      }
     });
     if (nextTab == LibraryTab.drive || nextTab == LibraryTab.all) {
       unawaited(
@@ -2971,6 +3294,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _visibleVideosSignature(),
       _selectedTab.name,
       _selectedPlaylistId ?? '',
+      _selectedDriveFolderId ?? '',
       _sortMode.name,
       _query,
       _recentIds.length,
@@ -2980,21 +3304,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return cached;
     }
     Iterable<VideoItem> items = switch (_selectedTab) {
-      LibraryTab.all => _videos,
-      LibraryTab.local => _videos.where(
-        (item) => item.source == VideoSource.local,
-      ),
-      LibraryTab.drive => _videos.where(
-        (item) => item.source == VideoSource.drive,
-      ),
+      LibraryTab.folders =>
+        _selectedDriveFolder == null
+            ? const <VideoItem>[]
+            : _videosForDriveFolder(_selectedDriveFolder!),
       LibraryTab.playlist =>
         _selectedPlaylist == null
             ? const <VideoItem>[]
             : _videosForPlaylist(_selectedPlaylist!),
+      LibraryTab.drive => _videos.where(
+        (item) => item.source == VideoSource.drive,
+      ),
       LibraryTab.recent =>
         _recentIds
             .map((id) => _videos.where((item) => item.id == id).firstOrNull)
             .whereType<VideoItem>(),
+      LibraryTab.all => _videos,
     };
     if (_query.isNotEmpty) {
       final lowerQuery = _query.toLowerCase();
@@ -3059,7 +3384,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ),
       ),
     );
-    return '$videoHash/$playlistHash';
+    final folderHash = Object.hashAll(
+      _driveFolders.map(
+        (folder) => Object.hash(
+          folder.id,
+          folder.name,
+          folder.updatedAt.millisecondsSinceEpoch,
+          folder.syncState,
+          Object.hashAll(folder.videoIds),
+        ),
+      ),
+    );
+    return '$videoHash/$playlistHash/$folderHash';
   }
 
   int _compareDateDesc(DateTime? a, DateTime? b) {
@@ -3110,6 +3446,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _handleMainBack({
     required bool selecting,
     required bool showingPlaylistDetail,
+    required bool showingFolderDetail,
   }) {
     if (selecting) {
       _clearSelection();
@@ -3123,6 +3460,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       setState(() => _selectedPlaylistId = null);
       return true;
     }
+    if (showingFolderDetail) {
+      setState(() => _selectedDriveFolderId = null);
+      return true;
+    }
     return false;
   }
 
@@ -3133,11 +3474,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final selecting = _selectedIds.isNotEmpty;
     final lastVideo = _lastPlaybackCandidate;
     final selectedPlaylist = _selectedPlaylist;
+    final selectedDriveFolder = _selectedDriveFolder;
     final showingPlaylistDetail =
         _selectedTab == LibraryTab.playlist && selectedPlaylist != null;
+    final showingFolderDetail =
+        _selectedTab == LibraryTab.folders && selectedDriveFolder != null;
 
     final hasInternalBackTarget =
-        selecting || _searchActive || showingPlaylistDetail;
+        selecting ||
+        _searchActive ||
+        showingPlaylistDetail ||
+        showingFolderDetail;
     final tabSide = _resolvedSideTabSide(mediaQuery);
     final useSideTabs = tabSide != null;
     final resolvedViewMode = _resolvedViewMode(mediaQuery);
@@ -3149,6 +3496,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _handleMainBack(
             selecting: selecting,
             showingPlaylistDetail: showingPlaylistDetail,
+            showingFolderDetail: showingFolderDetail,
           );
         }
       },
@@ -3166,6 +3514,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   onPressed: () => setState(() => _selectedPlaylistId = null),
                   icon: const Icon(Icons.arrow_back),
                 )
+              : showingFolderDetail
+              ? IconButton(
+                  tooltip: '폴더',
+                  onPressed: () =>
+                      setState(() => _selectedDriveFolderId = null),
+                  icon: const Icon(Icons.arrow_back),
+                )
               : null,
           title: _searchActive && !selecting
               ? TextField(
@@ -3181,6 +3536,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       ? t.selectedCount(_selectedIds.length)
                       : showingPlaylistDetail
                       ? selectedPlaylist.name
+                      : showingFolderDetail
+                      ? selectedDriveFolder.name
                       : '클라우드플레이어',
                 ),
           actions: selecting
@@ -3272,6 +3629,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                         strings: t,
                                         tabLabel: showingPlaylistDetail
                                             ? selectedPlaylist.name
+                                            : showingFolderDetail
+                                            ? selectedDriveFolder.name
                                             : _tabLabel(_selectedTab),
                                         onAddDrive: _openDriveBrowser,
                                         onPlayInOrder:
@@ -3288,7 +3647,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                       ),
                                 ),
                               ),
-                              if (_selectedTab == LibraryTab.playlist &&
+                              if (_selectedTab == LibraryTab.folders &&
+                                  selectedDriveFolder == null)
+                                _DriveFolderSliverList(
+                                  folders: _driveFolders,
+                                  strings: t,
+                                  coverFor: _coverForDriveFolder,
+                                  countFor: (folder) =>
+                                      _videosForDriveFolder(folder).length,
+                                  onOpen: (folder) => setState(
+                                    () => _selectedDriveFolderId = folder.id,
+                                  ),
+                                  onPlay: (folder) => _startPlayback(
+                                    _videosForDriveFolder(folder),
+                                    startIndex: 0,
+                                  ),
+                                  onRefresh: _refreshDriveFolder,
+                                  onImportDrive: _openDriveBrowser,
+                                )
+                              else if (_selectedTab == LibraryTab.playlist &&
                                   selectedPlaylist == null)
                                 _PlaylistSliverList(
                                   playlists: _playlists,
@@ -3549,10 +3926,11 @@ class _BottomTabs extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final visibleTabs = <LibraryTab>[
-      LibraryTab.all,
-      LibraryTab.recent,
-      LibraryTab.drive,
+      LibraryTab.folders,
       LibraryTab.playlist,
+      LibraryTab.drive,
+      LibraryTab.recent,
+      LibraryTab.all,
     ];
     final selectedTab = tabs[selectedIndex];
     return SafeArea(
@@ -3601,10 +3979,11 @@ class _SideTabs extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final visibleTabs = <LibraryTab>[
-      LibraryTab.all,
-      LibraryTab.recent,
-      LibraryTab.drive,
+      LibraryTab.folders,
       LibraryTab.playlist,
+      LibraryTab.drive,
+      LibraryTab.recent,
+      LibraryTab.all,
     ];
     final selectedTab = tabs[selectedIndex];
     return Container(
@@ -3738,7 +4117,8 @@ class _LibraryHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final showDriveAction = selectedTab == LibraryTab.drive;
+    final showDriveAction =
+        selectedTab == LibraryTab.drive || selectedTab == LibraryTab.folders;
     return Padding(
       padding: EdgeInsets.fromLTRB(16, compact ? 4 : 6, 16, compact ? 4 : 6),
       child: Row(
@@ -3804,6 +4184,202 @@ class _LibraryHeader extends StatelessWidget {
             ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+class _DriveFolderSliverList extends StatelessWidget {
+  const _DriveFolderSliverList({
+    required this.folders,
+    required this.strings,
+    required this.coverFor,
+    required this.countFor,
+    required this.onOpen,
+    required this.onPlay,
+    required this.onRefresh,
+    required this.onImportDrive,
+  });
+
+  final List<DriveFolderLibrary> folders;
+  final AppStrings strings;
+  final VideoItem? Function(DriveFolderLibrary folder) coverFor;
+  final int Function(DriveFolderLibrary folder) countFor;
+  final ValueChanged<DriveFolderLibrary> onOpen;
+  final ValueChanged<DriveFolderLibrary> onPlay;
+  final ValueChanged<DriveFolderLibrary> onRefresh;
+  final VoidCallback onImportDrive;
+
+  @override
+  Widget build(BuildContext context) {
+    if (folders.isEmpty) {
+      return SliverFillRemaining(
+        hasScrollBody: false,
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(28),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.folder_outlined, size: 46, color: _Ui.text3),
+                const SizedBox(height: 12),
+                Text(
+                  'Drive 폴더를 가져오면 여기에 정리됩니다.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: _Ui.text2),
+                ),
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  onPressed: onImportDrive,
+                  icon: const Icon(Icons.cloud_download_outlined),
+                  label: Text(strings.importFromDrive),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return SliverPadding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+      sliver: SliverList.separated(
+        itemCount: folders.length,
+        separatorBuilder: (context, index) => const SizedBox(height: 8),
+        itemBuilder: (context, index) {
+          final folder = folders[index];
+          return _DriveFolderTile(
+            folder: folder,
+            cover: coverFor(folder),
+            count: countFor(folder),
+            strings: strings,
+            onOpen: () => onOpen(folder),
+            onPlay: () => onPlay(folder),
+            onRefresh: () => onRefresh(folder),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _DriveFolderTile extends StatelessWidget {
+  const _DriveFolderTile({
+    required this.folder,
+    required this.cover,
+    required this.count,
+    required this.strings,
+    required this.onOpen,
+    required this.onPlay,
+    required this.onRefresh,
+  });
+
+  final DriveFolderLibrary folder;
+  final VideoItem? cover;
+  final int count;
+  final AppStrings strings;
+  final VoidCallback onOpen;
+  final VoidCallback onPlay;
+  final VoidCallback onRefresh;
+
+  @override
+  Widget build(BuildContext context) {
+    final coverItem = cover;
+    final syncing = folder.syncState == 'syncing';
+    final failed = folder.syncState == 'failed';
+    final syncLabel = syncing
+        ? '동기화 중'
+        : failed
+        ? '동기화 실패'
+        : folder.lastSyncedAt == null
+        ? '아직 동기화 전'
+        : '마지막 동기화 ${_formatDate(folder.lastSyncedAt!)}';
+    return Material(
+      color: _Ui.card,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: onOpen,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+          child: Row(
+            children: [
+              coverItem == null
+                  ? Container(
+                      width: 92,
+                      height: 56,
+                      decoration: BoxDecoration(
+                        color: _Ui.surface2,
+                        borderRadius: BorderRadius.circular(5),
+                      ),
+                      child: Icon(Icons.folder_outlined, color: _Ui.text3),
+                    )
+                  : _VideoThumb(
+                      source: coverItem.source,
+                      thumbnailBase64: coverItem.thumbnailBase64,
+                      thumbnailUrl: coverItem.thumbnailUrl,
+                    ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      folder.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _Ui.text,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        _SourcePill(label: strings.videoCount(count)),
+                        const _SourcePill(label: 'Google Drive'),
+                        Text(
+                          syncLabel,
+                          style: TextStyle(
+                            color: failed ? _Ui.red : _Ui.text2,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (syncing) ...[
+                      const SizedBox(height: 7),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(999),
+                        child: const LinearProgressIndicator(minHeight: 2),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              IconButton(
+                tooltip: strings.playInOrder,
+                onPressed: count == 0 || syncing ? null : onPlay,
+                icon: const Icon(Icons.play_arrow),
+              ),
+              IconButton(
+                tooltip: 'Drive 새로고침',
+                onPressed: syncing ? null : onRefresh,
+                icon: syncing
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.refresh),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -4741,7 +5317,7 @@ class _EmptyTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final message = switch (tab) {
-      LibraryTab.local => strings.noVideos,
+      LibraryTab.folders => '이 폴더에 재생할 영상이 없습니다.',
       LibraryTab.drive => strings.importVideosFromDrive,
       LibraryTab.recent => strings.noRecentVideos,
       LibraryTab.playlist => strings.playlistEmpty,
@@ -5227,6 +5803,9 @@ class _DrivePickerDialogState extends State<_DrivePickerDialog> {
           foldersScanned: foldersScanned,
           videosFound: videosFound,
           createPlaylist: folders.isNotEmpty,
+          sourceFolderId: folders.length == 1 && videos.isEmpty
+              ? folders.first.id
+              : null,
         ),
       );
     } finally {

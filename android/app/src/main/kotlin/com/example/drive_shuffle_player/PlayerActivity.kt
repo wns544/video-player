@@ -30,7 +30,9 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.media3.common.MediaItem
@@ -65,6 +67,9 @@ class PlayerActivity : Activity() {
     private lateinit var hintText: TextView
     private lateinit var overlay: LinearLayout
     private lateinit var overlayText: TextView
+    private lateinit var overlaySpinner: ProgressBar
+    private lateinit var overlayProgress: ProgressBar
+    private lateinit var overlayAction: Button
     private lateinit var panelScrim: FrameLayout
     private lateinit var gestureDetector: GestureDetector
     private lateinit var controllerFuture: ListenableFuture<MediaController>
@@ -120,6 +125,7 @@ class PlayerActivity : Activity() {
         override fun run() {
             if (!progressUpdatesRunning) return
             updateControls()
+            updateOverlay()
             handler.postDelayed(this, progressUpdateDelayMs())
         }
     }
@@ -163,11 +169,16 @@ class PlayerActivity : Activity() {
             PlaybackAuth.lastHttpStatusCode = httpStatus
             playbackErrorMessage =
                 if (authError) {
-                    "Drive 인증을 갱신하는 중입니다..."
+                    "Drive 인증이 필요합니다"
                 } else {
                     "재생 오류\n${error.errorCodeName}"
                 }
-            showOverlay(playbackErrorMessage.orEmpty())
+            showOverlay(
+                playbackErrorMessage.orEmpty(),
+                showProgress = authError,
+                determinateProgress = null,
+                showReconnectAction = authError,
+            )
         }
     }
 
@@ -316,6 +327,25 @@ class PlayerActivity : Activity() {
             setPadding(dp(32), dp(16), dp(32), dp(16))
             includeFontPadding = false
         }
+        overlaySpinner = ProgressBar(this).apply {
+            isIndeterminate = true
+        }
+        overlayProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            progress = 0
+            isIndeterminate = true
+            progressDrawable?.setTint(ACCENT)
+        }
+        overlayAction = Button(this).apply {
+            text = "Drive 다시 연결"
+            visibility = View.GONE
+            setOnClickListener {
+                showOverlay("Drive 재인증 화면을 여는 중...", showProgress = true)
+                startActivity(Intent(this@PlayerActivity, MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                })
+            }
+        }
         overlay = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
@@ -324,7 +354,15 @@ class PlayerActivity : Activity() {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
             )
+            setPadding(dp(28), dp(28), dp(28), dp(28))
+            addView(overlaySpinner, LinearLayout.LayoutParams(dp(52), dp(52)))
             addView(overlayText)
+            addView(overlayProgress, LinearLayout.LayoutParams(dp(260), dp(8)).apply {
+                topMargin = dp(4)
+            })
+            addView(overlayAction, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(44)).apply {
+                topMargin = dp(18)
+            })
         }
 
         controls = buildControls()
@@ -1344,29 +1382,55 @@ class PlayerActivity : Activity() {
     private fun updateOverlay() {
         if (inPip || enteringPip) return
         playbackErrorMessage?.let {
-            showOverlay(it)
+            val authError = PlaybackAuth.authError
+            showOverlay(
+                it,
+                showProgress = authError,
+                determinateProgress = null,
+                showReconnectAction = authError,
+            )
             return
         }
         val mediaController = controller ?: run {
-            showOverlay("플레이어 연결 중...")
+            showOverlay("플레이어 연결 중...", showProgress = true)
             return
         }
         if (mediaController.mediaItemCount <= 0) {
-            showOverlay("재생할 영상이 없습니다")
+            showOverlay("재생할 영상이 없습니다", showProgress = false)
             return
         }
         when (mediaController.playbackState) {
-            Player.STATE_IDLE -> showOverlay("영상 준비 중...")
-            Player.STATE_BUFFERING -> showOverlay("영상 불러오는 중...")
+            Player.STATE_IDLE -> showOverlay("영상 준비 중...", showProgress = true)
+            Player.STATE_BUFFERING -> showOverlay(
+                "영상 불러오는 중...",
+                showProgress = true,
+                determinateProgress = mediaController.bufferedPercentage.takeIf { it in 1..99 },
+            )
             Player.STATE_READY -> hideOverlay()
-            Player.STATE_ENDED -> showOverlay("재생이 끝났습니다")
-            else -> showOverlay("영상 준비 중...")
+            Player.STATE_ENDED -> showOverlay("재생이 끝났습니다", showProgress = false)
+            else -> showOverlay("영상 준비 중...", showProgress = true)
         }
     }
 
-    private fun showOverlay(message: String) {
+    private fun showOverlay(
+        message: String,
+        showProgress: Boolean = true,
+        determinateProgress: Int? = null,
+        showReconnectAction: Boolean = false,
+    ) {
         if (inPip || enteringPip) return
         overlayText.text = message
+        overlaySpinner.visibility = if (showProgress) View.VISIBLE else View.GONE
+        overlayProgress.visibility = if (showProgress) View.VISIBLE else View.GONE
+        overlayProgress.isIndeterminate = determinateProgress == null
+        if (determinateProgress != null) {
+            overlayProgress.progress = determinateProgress.coerceIn(0, 100)
+        }
+        overlayAction.visibility = if (showReconnectAction) View.VISIBLE else View.GONE
+        if (showProgress || showReconnectAction) {
+            handler.removeCallbacks(hideControlsRunnable)
+            setControlsVisible(false)
+        }
         overlay.visibility = View.VISIBLE
     }
 
@@ -1389,6 +1453,7 @@ class PlayerActivity : Activity() {
 
     private fun hideOverlay() {
         overlay.visibility = View.GONE
+        overlayAction.visibility = View.GONE
     }
 
     private fun formatTime(milliseconds: Long): String {
