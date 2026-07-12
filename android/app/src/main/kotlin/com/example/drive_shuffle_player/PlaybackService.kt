@@ -3,6 +3,8 @@ package com.example.drive_shuffle_player
 import android.app.PendingIntent
 import android.content.Intent
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
@@ -20,6 +22,32 @@ object PlaybackAuth {
 
     @Volatile
     var lastHttpStatusCode: Int? = null
+
+    @Volatile
+    var lastErrorKind: String? = null
+
+    @Volatile
+    var lastErrorMessage: String? = null
+
+    @Volatile
+    var lastErrorMediaId: String? = null
+}
+
+object PlaybackSessionState {
+    @Volatile
+    var originalQueue: List<MediaItem> = emptyList()
+
+    @Volatile
+    var shuffleEnabled: Boolean = false
+
+    @Volatile
+    var repeatMode: Int = Player.REPEAT_MODE_ALL
+
+    @Volatile
+    var failurePolicy: String = "ask"
+
+    @Volatile
+    var resizeMode: String = "fit"
 }
 
 class PlaybackService : MediaSessionService() {

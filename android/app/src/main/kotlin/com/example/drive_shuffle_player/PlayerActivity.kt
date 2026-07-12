@@ -1,8 +1,10 @@
 ﻿package com.example.drive_shuffle_player
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
+import android.app.PictureInPictureUiState
 import android.app.RemoteAction
 import android.content.ComponentName
 import android.content.Context
@@ -13,6 +15,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.Icon
@@ -20,6 +23,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.util.Log
 import android.util.Rational
 import android.view.GestureDetector
@@ -30,22 +35,31 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.annotation.RequiresApi
+import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import kotlin.math.roundToInt
 
 class PlayerActivity : Activity() {
+    private lateinit var rootView: FrameLayout
     private lateinit var playerView: PlayerView
     private lateinit var controls: FrameLayout
     private lateinit var topBar: LinearLayout
@@ -91,6 +105,9 @@ class PlayerActivity : Activity() {
     private var horizontalSeekStartX = 0f
     private var horizontalSeekAccumulatedMs = 0L
     private var queueBeforeShuffle: List<MediaItem>? = null
+    private val failedMediaIds = linkedSetOf<String>()
+    private var failureDialogVisible = false
+    private var pendingSubtitleMediaId: String? = null
 
     private val resizeModes = intArrayOf(
         AspectRatioFrameLayout.RESIZE_MODE_FIT,
@@ -137,6 +154,10 @@ class PlayerActivity : Activity() {
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
             Log.d(TAG, "state=$playbackState count=${controller?.mediaItemCount}")
+            if (playbackState == Player.STATE_READY) {
+                controller?.currentMediaItem?.mediaId?.let(failedMediaIds::remove)
+                clearPlaybackFailure()
+            }
             updateOverlay()
             updateControls()
         }
@@ -157,17 +178,7 @@ class PlayerActivity : Activity() {
         override fun onPlayerError(error: PlaybackException) {
             val detail = error.cause?.message ?: error.message ?: error.errorCodeName
             Log.d(TAG, "error=${error.errorCodeName}: $detail", error)
-            val httpStatus = httpStatusCodeFor(error)
-            val authError = httpStatus == 401 || httpStatus == 403
-            PlaybackAuth.authError = authError
-            PlaybackAuth.lastHttpStatusCode = httpStatus
-            playbackErrorMessage =
-                if (authError) {
-                    "Drive 인증을 갱신하는 중입니다..."
-                } else {
-                    "재생 오류\n${error.errorCodeName}"
-                }
-            showOverlay(playbackErrorMessage.orEmpty())
+            handlePlaybackFailure(error, detail)
         }
     }
 
@@ -188,6 +199,16 @@ class PlayerActivity : Activity() {
                         controller = mediaController
                         playerView.player = mediaController
                         mediaController.addListener(playerListener)
+                        shuffleQueueActive = PlaybackSessionState.shuffleEnabled
+                        queueBeforeShuffle = PlaybackSessionState.originalQueue
+                            .takeIf { it.isNotEmpty() }
+                        mediaController.repeatMode = PlaybackSessionState.repeatMode
+                        resizeModeIndex = when (PlaybackSessionState.resizeMode) {
+                            "fill" -> 1
+                            "zoom" -> 2
+                            else -> 0
+                        }
+                        playerView.resizeMode = resizeModes[resizeModeIndex]
                         updateOverlay()
                         updateControls()
                         updatePipParamsIfPossible()
@@ -243,8 +264,33 @@ class PlayerActivity : Activity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        if (controller?.mediaItemCount ?: 0 > 0) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && (controller?.mediaItemCount ?: 0) > 0) {
             enterPipMode()
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != PICK_EXTERNAL_SUBTITLE_REQUEST) return
+        val targetMediaId = pendingSubtitleMediaId
+        pendingSubtitleMediaId = null
+        if (resultCode != RESULT_OK || data?.data == null || targetMediaId == null) return
+        val uri = data.data ?: return
+        try {
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (_: SecurityException) {
+            // Some providers only grant access for the current install.
+        }
+        attachExternalSubtitle(targetMediaId, uri)
+    }
+
+    @RequiresApi(Build.VERSION_CODES.S)
+    override fun onPictureInPictureUiStateChanged(pipState: PictureInPictureUiState) {
+        super.onPictureInPictureUiStateChanged(pipState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM && pipState.isTransitioningToPip) {
+            enteringPip = true
+            hideChromeForPip()
         }
     }
 
@@ -265,7 +311,7 @@ class PlayerActivity : Activity() {
     }
 
     private fun buildContentView(): View {
-        val root = FrameLayout(this).apply {
+        rootView = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
         }
         gestureDetector = GestureDetector(this, PlayerGestureListener())
@@ -331,9 +377,9 @@ class PlayerActivity : Activity() {
         panelScrim = buildPanelScrim()
         unlockOverlay = buildUnlockOverlay()
 
-        root.addView(playerView)
-        root.addView(controls)
-        root.addView(
+        rootView.addView(playerView)
+        rootView.addView(controls)
+        rootView.addView(
             hintText,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -341,11 +387,14 @@ class PlayerActivity : Activity() {
                 Gravity.TOP or Gravity.CENTER_HORIZONTAL,
             ).apply { topMargin = dp(88) },
         )
-        root.addView(overlay)
-        root.addView(panelScrim)
-        root.addView(unlockOverlay)
+        rootView.addView(overlay)
+        rootView.addView(panelScrim)
+        rootView.addView(unlockOverlay)
         scheduleHideControls()
-        return root
+        playerView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            updatePipParamsIfPossible()
+        }
+        return rootView
     }
 
     private fun buildControls(): FrameLayout {
@@ -406,15 +455,7 @@ class PlayerActivity : Activity() {
         val centerLayer = LinearLayout(this).apply {
             gravity = Gravity.CENTER
             orientation = LinearLayout.HORIZONTAL
-            addView(IconGlassButton(this@PlayerActivity, ICON_PREVIOUS).apply {
-                setOnClickListener { safeAction { controller?.seekToPreviousMediaItem() } }
-            }, LinearLayout.LayoutParams(dp(56), dp(56)))
-            addView(space(42))
             addView(centerPlayButton, LinearLayout.LayoutParams(dp(82), dp(82)))
-            addView(space(42))
-            addView(IconGlassButton(this@PlayerActivity, ICON_NEXT).apply {
-                setOnClickListener { safeAction { controller?.seekToNextMediaItem() } }
-            }, LinearLayout.LayoutParams(dp(56), dp(56)))
         }
 
         val timeRow = LinearLayout(this).apply {
@@ -490,16 +531,28 @@ class PlayerActivity : Activity() {
     private fun renderQuickRow() {
         quickRow.removeAllViews()
         if (controlsOnRight) {
-            addSwapButton()
+            addNavigationActions()
             quickRow.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
             addQuickActions()
+            quickRow.addView(space(8))
+            addSwapButton()
         } else {
+            addSwapButton()
+            quickRow.addView(space(8))
             addQuickActions()
             quickRow.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-            addSwapButton()
+            addNavigationActions()
         }
-        quickRow.addView(space(8))
-        quickRow.addView(resizeButton, LinearLayout.LayoutParams(dp(48), dp(48)))
+    }
+
+    private fun addNavigationActions() {
+        quickRow.addView(IconGlassButton(this, ICON_PREVIOUS).apply {
+            setOnClickListener { safeAction { controller?.seekToPreviousMediaItem() } }
+        }, LinearLayout.LayoutParams(dp(46), dp(46)))
+        quickRow.addView(space(6))
+        quickRow.addView(IconGlassButton(this, ICON_NEXT).apply {
+            setOnClickListener { safeAction { controller?.seekToNextMediaItem() } }
+        }, LinearLayout.LayoutParams(dp(46), dp(46)))
     }
 
     private fun addQuickActions() {
@@ -534,6 +587,8 @@ class PlayerActivity : Activity() {
         }, LinearLayout.LayoutParams(dp(52), dp(48)))
         quickRow.addView(space(8))
         quickRow.addView(repeatButton, LinearLayout.LayoutParams(dp(48), dp(48)))
+        quickRow.addView(space(8))
+        quickRow.addView(resizeButton, LinearLayout.LayoutParams(dp(48), dp(48)))
     }
 
     private fun addSwapButton() {
@@ -702,6 +757,105 @@ class PlayerActivity : Activity() {
         return null
     }
 
+    private fun handlePlaybackFailure(error: PlaybackException, detail: String) {
+        val mediaController = controller
+        val mediaId = mediaController?.currentMediaItem?.mediaId
+        val httpStatus = httpStatusCodeFor(error)
+        val kind = classifyPlaybackFailure(error, httpStatus)
+        val message = playbackFailureMessage(kind)
+        PlaybackAuth.authError = kind == "authRequired"
+        PlaybackAuth.lastHttpStatusCode = httpStatus
+        PlaybackAuth.lastErrorKind = kind
+        PlaybackAuth.lastErrorMessage = "$message ($detail)"
+        PlaybackAuth.lastErrorMediaId = mediaId
+        playbackErrorMessage = message
+        showOverlay(message)
+
+        if (kind == "authRequired") return
+        mediaId?.let(failedMediaIds::add)
+        when (PlaybackSessionState.failurePolicy) {
+            "skip" -> skipFailedMediaOrStop()
+            "stop" -> mediaController?.pause()
+            else -> showPlaybackFailureDialog(message)
+        }
+    }
+
+    private fun classifyPlaybackFailure(error: PlaybackException, httpStatus: Int?): String {
+        return when {
+            httpStatus == 401 -> "authRequired"
+            httpStatus == 403 || error.errorCode == PlaybackException.ERROR_CODE_IO_NO_PERMISSION -> "accessDenied"
+            httpStatus == 404 || error.errorCode == PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> "fileMissing"
+            httpStatus == 429 -> "rateLimited"
+            httpStatus != null && httpStatus >= 500 -> "server"
+            error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+                error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "network"
+            else -> "unknown"
+        }
+    }
+
+    private fun playbackFailureMessage(kind: String): String {
+        return when (kind) {
+            "authRequired" -> "Drive 연결이 만료되었습니다. 다시 연결해 주세요."
+            "accessDenied" -> "이 계정으로 접근 권한이 없습니다."
+            "fileMissing" -> "Drive에서 파일을 찾을 수 없습니다."
+            "network" -> "네트워크 연결 후 다시 시도해 주세요."
+            "rateLimited" -> "Drive 요청이 많습니다. 잠시 후 다시 시도해 주세요."
+            "server" -> "Drive 서버 응답이 원활하지 않습니다. 잠시 후 다시 시도해 주세요."
+            else -> "이 영상을 재생하지 못했습니다."
+        }
+    }
+
+    private fun clearPlaybackFailure() {
+        playbackErrorMessage = null
+        PlaybackAuth.authError = false
+        PlaybackAuth.lastHttpStatusCode = null
+        PlaybackAuth.lastErrorKind = null
+        PlaybackAuth.lastErrorMessage = null
+        PlaybackAuth.lastErrorMediaId = null
+    }
+
+    private fun showPlaybackFailureDialog(message: String) {
+        val mediaController = controller ?: return
+        if (failureDialogVisible || isFinishing || isDestroyed || inPip || enteringPip) {
+            mediaController.pause()
+            return
+        }
+        failureDialogVisible = true
+        mediaController.pause()
+        AlertDialog.Builder(this)
+            .setTitle("재생 실패")
+            .setMessage("$message\n다음 영상으로 넘어갈까요?")
+            .setPositiveButton("다음 영상") { _, _ -> skipFailedMediaOrStop() }
+            .setNegativeButton("정지") { _, _ -> mediaController.pause() }
+            .setOnDismissListener { failureDialogVisible = false }
+            .show()
+    }
+
+    private fun skipFailedMediaOrStop() {
+        val mediaController = controller ?: return
+        val count = mediaController.mediaItemCount
+        if (count <= 1 || failedMediaIds.size >= count) {
+            mediaController.pause()
+            playbackErrorMessage = "재생 가능한 다음 영상이 없습니다."
+            showOverlay(playbackErrorMessage.orEmpty())
+            return
+        }
+        val currentIndex = mediaController.currentMediaItemIndex.coerceAtLeast(0)
+        val nextIndex = (1 until count)
+            .map { offset -> (currentIndex + offset) % count }
+            .firstOrNull { index -> mediaController.getMediaItemAt(index).mediaId !in failedMediaIds }
+        if (nextIndex == null) {
+            mediaController.pause()
+            playbackErrorMessage = "재생 가능한 다음 영상이 없습니다."
+            showOverlay(playbackErrorMessage.orEmpty())
+            return
+        }
+        playbackErrorMessage = null
+        mediaController.seekToDefaultPosition(nextIndex)
+        mediaController.prepare()
+        mediaController.play()
+    }
+
     private fun togglePlayPause() {
         val mediaController = controller ?: return
         if (mediaController.isPlaying) {
@@ -717,6 +871,8 @@ class PlayerActivity : Activity() {
         if (mediaController.mediaItemCount <= 1) {
             shuffleQueueActive = false
             queueBeforeShuffle = null
+            PlaybackSessionState.shuffleEnabled = false
+            PlaybackSessionState.originalQueue = collectQueue(mediaController)
             mediaController.shuffleModeEnabled = false
             updateControls()
             showHint("셔플할 다음 영상이 없습니다")
@@ -726,11 +882,15 @@ class PlayerActivity : Activity() {
             restoreQueueBeforeShuffle(mediaController)
             shuffleQueueActive = false
             queueBeforeShuffle = null
+            PlaybackSessionState.shuffleEnabled = false
+            PlaybackSessionState.originalQueue = collectQueue(mediaController)
             showHint("셔플 꺼짐 · 큐 순서 복원")
         } else {
             queueBeforeShuffle = collectQueue(mediaController)
+            PlaybackSessionState.originalQueue = queueBeforeShuffle.orEmpty()
             shuffleQueue(mediaController)
             shuffleQueueActive = true
+            PlaybackSessionState.shuffleEnabled = true
             showHint("셔플 켜짐 · 큐를 섞었습니다")
         }
         mediaController.shuffleModeEnabled = false
@@ -780,6 +940,7 @@ class PlayerActivity : Activity() {
             Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
             else -> Player.REPEAT_MODE_OFF
         }
+        PlaybackSessionState.repeatMode = mediaController.repeatMode
         updateControls()
         showHint("반복: ${repeatModeLabel(mediaController.repeatMode)}")
     }
@@ -855,6 +1016,11 @@ class PlayerActivity : Activity() {
     private fun setResizeMode(index: Int) {
         resizeModeIndex = index.coerceIn(resizeModes.indices)
         playerView.resizeMode = resizeModes[resizeModeIndex]
+        PlaybackSessionState.resizeMode = when (resizeModeIndex) {
+            1 -> "fill"
+            2 -> "zoom"
+            else -> "fit"
+        }
         if (::resizeButton.isInitialized) resizeButton.invalidate()
         showHint("화면 비율: ${resizeModeLabels[resizeModeIndex]}")
     }
@@ -968,16 +1134,176 @@ class PlayerActivity : Activity() {
             addView(panelOption("재생 정지", "현재 큐를 비우고 플레이어를 닫습니다") {
                 stopPlaybackAndClose()
             })
-            addView(panelOption("자막", "다음 단계에서 지원 예정") {
-                hidePanel()
-                showHint("자막은 다음 단계에서 지원 예정")
+            addView(panelOption("자막", subtitleSummary(mediaController)) {
+                showTrackPanel(C.TRACK_TYPE_TEXT)
             })
-            addView(panelOption("오디오 트랙", "다음 단계에서 지원 예정") {
-                hidePanel()
-                showHint("오디오 트랙은 다음 단계에서 지원 예정")
+            addView(panelOption("오디오 트랙", trackSummary(mediaController, C.TRACK_TYPE_AUDIO)) {
+                showTrackPanel(C.TRACK_TYPE_AUDIO)
+            })
+            addView(panelOption("화면 비율", resizeModeLabels[resizeModeIndex]) {
+                cycleResizeMode()
+                showPlayerOptionsPanel()
             })
         }
         showPanel(panel, widthDp = 260, gravity = Gravity.TOP or Gravity.RIGHT, topMarginDp = 84, rightMarginDp = 18)
+    }
+
+    private fun subtitleSummary(mediaController: MediaController): String {
+        val selected = mediaController.currentTracks.groups.any { group ->
+            group.type == C.TRACK_TYPE_TEXT && (0 until group.length).any(group::isTrackSelected)
+        }
+        val attached = mediaController.currentMediaItem
+            ?.localConfiguration
+            ?.subtitleConfigurations
+            ?.firstOrNull()
+            ?.label
+        return when {
+            !attached.isNullOrBlank() -> "연결됨 · $attached"
+            selected -> "영상 내 자막 사용 중"
+            else -> "꺼짐 · 외부 SRT/VTT 추가 가능"
+        }
+    }
+
+    private fun trackSummary(mediaController: MediaController, trackType: Int): String {
+        val selected = mediaController.currentTracks.groups.firstNotNullOfOrNull { group ->
+            if (group.type != trackType) return@firstNotNullOfOrNull null
+            (0 until group.length).firstOrNull(group::isTrackSelected)?.let { index ->
+                formatTrackLabel(group.getTrackFormat(index), index)
+            }
+        }
+        return selected ?: "자동"
+    }
+
+    private fun showTrackPanel(trackType: Int) {
+        val mediaController = controller ?: return
+        hidePanel()
+        val isText = trackType == C.TRACK_TYPE_TEXT
+        val options = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val groups = mediaController.currentTracks.groups.filter { it.type == trackType }
+        val hasSelectedTrack = groups.any { group ->
+            (0 until group.length).any(group::isTrackSelected)
+        }
+
+        if (isText) {
+            options.addView(panelOption("자막 끄기", "영상은 그대로 재생됩니다", highlighted = !hasSelectedTrack) {
+                mediaController.trackSelectionParameters = mediaController.trackSelectionParameters
+                    .buildUpon()
+                    .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                    .build()
+                hidePanel()
+                showHint("자막 꺼짐")
+            })
+        } else {
+            options.addView(panelOption("자동 선택", "영상의 기본 오디오 트랙", highlighted = !hasSelectedTrack) {
+                mediaController.trackSelectionParameters = mediaController.trackSelectionParameters
+                    .buildUpon()
+                    .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+                    .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+                    .build()
+                hidePanel()
+                showHint("오디오 트랙: 자동")
+            })
+        }
+
+        groups.forEachIndexed { groupIndex, group ->
+            for (trackIndex in 0 until group.length) {
+                val format = group.getTrackFormat(trackIndex)
+                val selected = group.isTrackSelected(trackIndex)
+                options.addView(panelOption(
+                    formatTrackLabel(format, trackIndex),
+                    if (selected) "현재 선택됨" else "탭해서 선택",
+                    highlighted = selected,
+                ) {
+                    mediaController.trackSelectionParameters = mediaController.trackSelectionParameters
+                        .buildUpon()
+                        .clearOverridesOfType(trackType)
+                        .setTrackTypeDisabled(trackType, false)
+                        .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, trackIndex))
+                        .build()
+                    hidePanel()
+                    showHint(if (isText) "자막 변경" else "오디오 트랙 변경")
+                })
+            }
+            if (groupIndex < groups.lastIndex) options.addView(space(4))
+        }
+
+        if (isText) {
+            options.addView(panelOption("외부 자막 파일", "SRT 또는 VTT 파일 연결") {
+                launchExternalSubtitlePicker()
+            })
+        }
+        if (groups.isEmpty() && !isText) {
+            options.addView(panelNote("선택 가능한 별도 오디오 트랙이 없습니다."))
+        }
+
+        val scroll = ScrollView(this).apply { addView(options) }
+        val panel = panelContainer(if (isText) "자막" else "오디오 트랙", compact = true).apply {
+            addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(280)))
+        }
+        showPanel(panel, widthDp = 300, gravity = Gravity.TOP or Gravity.RIGHT, topMarginDp = 72, rightMarginDp = 18)
+    }
+
+    private fun formatTrackLabel(format: Format, index: Int): String {
+        val details = listOfNotNull(
+            format.label?.takeIf { it.isNotBlank() },
+            format.language?.takeIf { it.isNotBlank() && it != "und" },
+            format.channelCount.takeIf { it > 0 }?.let { "${it}ch" },
+            format.height.takeIf { it > 0 }?.let { "${it}p" },
+        ).distinct()
+        return details.joinToString(" · ").ifBlank { "트랙 ${index + 1}" }
+    }
+
+    private fun launchExternalSubtitlePicker() {
+        val mediaId = controller?.currentMediaItem?.mediaId ?: return
+        pendingSubtitleMediaId = mediaId
+        hidePanel()
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(
+                Intent.EXTRA_MIME_TYPES,
+                arrayOf("application/x-subrip", "application/srt", "text/vtt", "text/plain"),
+            )
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        startActivityForResult(intent, PICK_EXTERNAL_SUBTITLE_REQUEST)
+    }
+
+    private fun attachExternalSubtitle(mediaId: String, uri: Uri) {
+        val mediaController = controller ?: return
+        val index = (0 until mediaController.mediaItemCount)
+            .firstOrNull { mediaController.getMediaItemAt(it).mediaId == mediaId }
+            ?: return
+        val name = displayNameFor(uri)
+        val mimeType = if (name.lowercase().endsWith(".vtt")) MimeTypes.TEXT_VTT else MimeTypes.APPLICATION_SUBRIP
+        val subtitle = MediaItem.SubtitleConfiguration.Builder(uri)
+            .setMimeType(mimeType)
+            .setLabel(name)
+            .build()
+        val wasPlaying = mediaController.isPlaying
+        val position = mediaController.currentPosition.coerceAtLeast(0L)
+        val updated = mediaController.getMediaItemAt(index)
+            .buildUpon()
+            .setSubtitleConfigurations(listOf(subtitle))
+            .build()
+        mediaController.replaceMediaItem(index, updated)
+        mediaController.trackSelectionParameters = mediaController.trackSelectionParameters
+            .buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+            .build()
+        mediaController.seekTo(index, position)
+        mediaController.prepare()
+        if (wasPlaying) mediaController.play()
+        showHint("자막 연결: $name")
+    }
+
+    private fun displayNameFor(uri: Uri): String {
+        return contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        } ?: uri.lastPathSegment ?: "외부 자막"
     }
 
     private fun showQueuePanel() {
@@ -987,25 +1313,25 @@ class PlayerActivity : Activity() {
             return
         }
         hidePanel()
-        val list = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        for (index in 0 until mediaController.mediaItemCount) {
+        val currentIndex = mediaController.currentMediaItemIndex.coerceIn(0, mediaController.mediaItemCount - 1)
+        val items = List(mediaController.mediaItemCount) { index ->
             val item = mediaController.getMediaItemAt(index)
-            val title = item.mediaMetadata.title?.toString().takeUnless { it.isNullOrBlank() }
-                ?: item.mediaId
-            val isCurrent = index == mediaController.currentMediaItemIndex
-            list.addView(panelOption(
-                if (isCurrent) "▶ ${index + 1}. $title" else "${index + 1}. $title",
-                if (isCurrent) "현재 재생 중" else "탭해서 이동",
-            ) {
+            QueueEntry(
+                index = index,
+                title = item.mediaMetadata.title?.toString().takeUnless { it.isNullOrBlank() } ?: item.mediaId,
+                isCurrent = index == currentIndex,
+            )
+        }
+        val layoutManager = LinearLayoutManager(this)
+        val list = RecyclerView(this).apply {
+            this.layoutManager = layoutManager
+            adapter = QueueAdapter(items) { index ->
                 mediaController.seekToDefaultPosition(index)
                 mediaController.play()
                 hidePanel()
-            })
-        }
-        val scroll = ScrollView(this).apply {
-            addView(list)
+            }
+            setHasFixedSize(true)
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
         }
         val title = if (shuffleQueueActive) {
             "현재 큐 · ${mediaController.mediaItemCount}개 · 셔플"
@@ -1016,12 +1342,15 @@ class PlayerActivity : Activity() {
             if (shuffleQueueActive) {
                 addView(panelNote("셔플 켜짐: 현재 영상은 유지하고 다음 큐를 섞었습니다."))
             }
-            addView(scroll, LinearLayout.LayoutParams(
+            addView(list, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 dp(280),
             ))
         }
         showPanel(panel, widthDp = 360, gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL, bottomMarginDp = 96)
+        list.post {
+            layoutManager.scrollToPositionWithOffset(currentIndex, 0)
+        }
     }
 
     private fun stopPlaybackAndClose() {
@@ -1057,25 +1386,57 @@ class PlayerActivity : Activity() {
         }
     }
 
-    private fun panelOption(title: String, subtitle: String, action: () -> Unit): View {
+    private fun panelOption(
+        title: String,
+        subtitle: String,
+        highlighted: Boolean = false,
+        action: () -> Unit,
+    ): View {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(2), dp(9), dp(2), dp(9))
+            if (highlighted) {
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+            } else {
+                setPadding(dp(2), dp(9), dp(2), dp(9))
+            }
+            if (highlighted) {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = dp(12).toFloat()
+                    setColor(Color.argb(78, 50, 191, 94))
+                    setStroke(dp(1), Color.argb(178, 50, 191, 94))
+                }
+            }
             addView(TextView(this@PlayerActivity).apply {
                 text = title
-                setTextColor(Color.WHITE)
+                setTextColor(if (highlighted) ACCENT else Color.WHITE)
                 textSize = 14f
                 typeface = Typeface.DEFAULT_BOLD
                 includeFontPadding = false
             })
             addView(TextView(this@PlayerActivity).apply {
                 text = subtitle
-                setTextColor(Color.argb(180, 255, 255, 255))
+                setTextColor(
+                    if (highlighted) {
+                        Color.argb(222, 255, 255, 255)
+                    } else {
+                        Color.argb(180, 255, 255, 255)
+                    },
+                )
                 textSize = 12f
                 includeFontPadding = false
             })
             setOnClickListener { action() }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                if (highlighted) {
+                    topMargin = dp(2)
+                    bottomMargin = dp(2)
+                }
+            }
         }
     }
 
@@ -1176,20 +1537,36 @@ class PlayerActivity : Activity() {
         hideChromeForPip()
         updatePipParamsIfPossible()
         handler.removeCallbacks(enterPipRunnable)
-        playerView.post {
-            hideChromeForPip()
-            playerView.invalidate()
-            window.decorView.invalidate()
-            handler.postDelayed(enterPipRunnable, PIP_ENTER_DELAY_MS)
+        waitForCleanPipFrame(3)
+    }
+
+    private fun waitForCleanPipFrame(framesRemaining: Int) {
+        hideChromeForPip()
+        playerView.invalidate()
+        window.decorView.invalidate()
+        if (framesRemaining <= 0) {
+            handler.post(enterPipRunnable)
+            return
+        }
+        rootView.postOnAnimation {
+            waitForCleanPipFrame(framesRemaining - 1)
         }
     }
 
     private fun buildPipParams(): PictureInPictureParams {
         val builder = PictureInPictureParams.Builder()
             .setAspectRatio(Rational(16, 9))
+        if (::playerView.isInitialized && playerView.isAttachedToWindow) {
+            val sourceRect = Rect()
+            if (playerView.getGlobalVisibleRect(sourceRect) && !sourceRect.isEmpty) {
+                builder.setSourceRectHint(sourceRect)
+            }
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                // Explicit entry lets the controls disappear before Android captures the PiP frame.
                 builder.setAutoEnterEnabled(false)
+                builder.setSeamlessResizeEnabled(true)
             }
             builder.setActions(
                 listOf(
@@ -1309,7 +1686,10 @@ class PlayerActivity : Activity() {
         hintText.visibility = View.GONE
         overlay.visibility = View.GONE
         unlockOverlay.visibility = View.GONE
+        controls.requestLayout()
+        rootView.requestLayout()
         playerView.invalidate()
+        rootView.invalidate()
         window.decorView.invalidate()
     }
 
@@ -1419,6 +1799,74 @@ class PlayerActivity : Activity() {
                     WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             }
         }
+    }
+
+    private data class QueueEntry(
+        val index: Int,
+        val title: String,
+        val isCurrent: Boolean,
+    )
+
+    private inner class QueueAdapter(
+        private val items: List<QueueEntry>,
+        private val onSelected: (Int) -> Unit,
+    ) : RecyclerView.Adapter<QueueAdapter.QueueViewHolder>() {
+        inner class QueueViewHolder(
+            val container: LinearLayout,
+            val title: TextView,
+            val subtitle: TextView,
+        ) : RecyclerView.ViewHolder(container)
+
+        override fun onCreateViewHolder(parent: android.view.ViewGroup, viewType: Int): QueueViewHolder {
+            val title = TextView(this@PlayerActivity).apply {
+                setTextColor(Color.WHITE)
+                textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
+                includeFontPadding = false
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+            val subtitle = TextView(this@PlayerActivity).apply {
+                setTextColor(Color.argb(180, 255, 255, 255))
+                textSize = 12f
+                includeFontPadding = false
+            }
+            val row = LinearLayout(this@PlayerActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+                addView(title)
+                addView(subtitle)
+                layoutParams = RecyclerView.LayoutParams(
+                    RecyclerView.LayoutParams.MATCH_PARENT,
+                    RecyclerView.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    topMargin = dp(2)
+                    bottomMargin = dp(2)
+                }
+            }
+            return QueueViewHolder(row, title, subtitle)
+        }
+
+        override fun onBindViewHolder(holder: QueueViewHolder, position: Int) {
+            val item = items[position]
+            holder.title.text = if (item.isCurrent) "▶ ${item.index + 1}. ${item.title}" else "${item.index + 1}. ${item.title}"
+            holder.title.setTextColor(if (item.isCurrent) ACCENT else Color.WHITE)
+            holder.subtitle.text = if (item.isCurrent) "현재 재생 중" else "탭해서 이동"
+            holder.container.background = if (item.isCurrent) {
+                GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = dp(12).toFloat()
+                    setColor(Color.argb(78, 50, 191, 94))
+                    setStroke(dp(1), Color.argb(178, 50, 191, 94))
+                }
+            } else {
+                null
+            }
+            holder.container.setOnClickListener { onSelected(item.index) }
+        }
+
+        override fun getItemCount(): Int = items.size
     }
 
     private inner class PlayerGestureListener : GestureDetector.SimpleOnGestureListener() {
@@ -1544,7 +1992,7 @@ class PlayerActivity : Activity() {
             vectorDrawableRes(icon)?.let { resId ->
                 val drawable = context.getDrawable(resId)?.mutate() ?: return
                 drawable.setTint(Color.WHITE)
-                val insetRatio = if (icon == ICON_RESIZE) 0.26f else 0.28f
+                val insetRatio = if (icon == ICON_RESIZE) 0.20f else 0.28f
                 val inset = (area.width() * insetRatio).roundToInt()
                 drawable.setBounds(
                     area.left.roundToInt() + inset,
@@ -1660,7 +2108,11 @@ class PlayerActivity : Activity() {
                 ICON_QUEUE -> R.drawable.ic_queue
                 ICON_REPEAT -> R.drawable.ic_repeat
                 ICON_REPEAT_ONE -> R.drawable.ic_repeat_one
-                ICON_RESIZE -> R.drawable.ic_resize_mode
+                ICON_RESIZE -> when (resizeModeIndex) {
+                    1 -> R.drawable.ic_resize_fill
+                    2 -> R.drawable.ic_resize_zoom
+                    else -> R.drawable.ic_resize_fit
+                }
                 else -> null
             }
         }
@@ -1762,16 +2214,16 @@ class PlayerActivity : Activity() {
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
             val fraction = (event.x / width.toFloat()).coerceIn(0f, 1f)
-            val ICON_NEXT = ((0.25f + 2.75f * fraction) * 20f).roundToInt() / 20f
+            val nextSpeed = ((0.25f + 2.75f * fraction) * 20f).roundToInt() / 20f
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
-                    speed = ICON_NEXT.coerceIn(0.25f, 3.0f)
+                    speed = nextSpeed.coerceIn(0.25f, 3.0f)
                     onSpeedChanged?.invoke(speed)
                     invalidate()
                     return true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    speed = ICON_NEXT.coerceIn(0.25f, 3.0f)
+                    speed = nextSpeed.coerceIn(0.25f, 3.0f)
                     onSpeedCommitted?.invoke(speed)
                     invalidate()
                     return true
@@ -1807,7 +2259,7 @@ class PlayerActivity : Activity() {
         private const val PIP_PREVIOUS_REQUEST_CODE = 4103
         private const val PIP_PLAY_PAUSE_REQUEST_CODE = 4104
         private const val PIP_NEXT_REQUEST_CODE = 4105
-        private const val PIP_ENTER_DELAY_MS = 180L
+        private const val PICK_EXTERNAL_SUBTITLE_REQUEST = 4212
         private const val ACCUMULATED_SEEK_DELAY_MS = 350L
     }
 }

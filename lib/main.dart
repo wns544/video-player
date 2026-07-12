@@ -9,6 +9,9 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'cloud_state.dart';
+import 'drive_app_data.dart';
+
 void main() {
   runApp(const DriveShuffleApp());
 }
@@ -35,8 +38,23 @@ const _prefsThemeKey = 'app_theme';
 const _prefsPlaybackQueueStateKey = 'playback_queue_state';
 const _prefsLastGoogleEmailKey = 'last_google_email';
 const _prefsDriveAuthStateKey = 'drive_auth_state';
+const _prefsDeviceIdKey = 'cloud_device_id';
+const _prefsDeviceNameKey = 'cloud_device_name';
+const _prefsCloudSyncMetadataKey = 'cloud_sync_metadata';
+const _prefsRecentQueuesKey = 'recent_playback_queues';
+const _prefsDriveImportsKey = 'drive_import_history';
+const _prefsDiagnosticsKey = 'diagnostic_events';
+const _prefsPlaybackFailurePolicyKey = 'playback_failure_policy';
+const _prefsRepeatModeKey = 'player_repeat_mode';
+const _prefsShuffleEnabledKey = 'player_shuffle_enabled';
+const _prefsResizeModeKey = 'player_resize_mode';
+const _prefsResumePlaybackUpdatedAtKey = 'resume_playback_updated_at';
+const _prefsLastCloudBackupAtKey = 'last_cloud_backup_at';
 const _driveImportConcurrency = 4;
 const _cloudPlaybackQueueFileName = 'cloud_playback_queue.json';
+const _cloudQueuePrefix = 'cloud_playback_queue_v2.';
+const _cloudLibraryPrefix = 'cloud_library_state_v1.';
+const _cloudBackupPrefix = 'cloud_backup_v1.';
 
 final _themeChoiceNotifier = ValueNotifier(AppThemeChoice.light);
 
@@ -439,6 +457,7 @@ class VideoItem {
     this.thumbnailUrl,
     this.width,
     this.height,
+    this.subtitle,
   });
 
   factory VideoItem.fromJson(Map<String, Object?> json) {
@@ -458,6 +477,11 @@ class VideoItem {
       thumbnailUrl: json['thumbnailUrl'] as String?,
       width: json['width'] as int?,
       height: json['height'] as int?,
+      subtitle: json['subtitle'] is Map
+          ? SubtitleReference.fromJson(
+              Map<String, Object?>.from(json['subtitle'] as Map),
+            )
+          : null,
     );
   }
 
@@ -476,9 +500,11 @@ class VideoItem {
   final String? thumbnailUrl;
   final int? width;
   final int? height;
+  final SubtitleReference? subtitle;
 
   VideoItem copyWith({
     String? title,
+    String? uri,
     int? size,
     DateTime? modifiedTime,
     int? duration,
@@ -490,11 +516,13 @@ class VideoItem {
     String? thumbnailUrl,
     int? width,
     int? height,
+    SubtitleReference? subtitle,
+    bool clearSubtitle = false,
   }) {
     return VideoItem(
       id: id,
       title: title ?? this.title,
-      uri: uri,
+      uri: uri ?? this.uri,
       source: source,
       size: size ?? this.size,
       modifiedTime: modifiedTime ?? this.modifiedTime,
@@ -507,6 +535,7 @@ class VideoItem {
       thumbnailUrl: thumbnailUrl ?? this.thumbnailUrl,
       width: width ?? this.width,
       height: height ?? this.height,
+      subtitle: clearSubtitle ? null : subtitle ?? this.subtitle,
     );
   }
 
@@ -526,6 +555,7 @@ class VideoItem {
     'thumbnailUrl': thumbnailUrl,
     'width': width,
     'height': height,
+    'subtitle': subtitle?.toJson(),
   };
 
   Map<String, Object?> toPlaybackMap() => {
@@ -533,6 +563,7 @@ class VideoItem {
     'title': title,
     'uri': uri,
     'source': source.name,
+    'subtitle': subtitle?.toJson(),
   };
 }
 
@@ -601,6 +632,9 @@ class PlaybackStateSummary {
     required this.isPlaying,
     this.positionMs = 0,
     this.durationMs = 0,
+    this.repeatMode = PlayerRepeatMode.all,
+    this.shuffleEnabled = false,
+    this.originalQueue = const [],
   });
 
   final List<VideoItem> queue;
@@ -608,6 +642,9 @@ class PlaybackStateSummary {
   final bool isPlaying;
   final int positionMs;
   final int durationMs;
+  final PlayerRepeatMode repeatMode;
+  final bool shuffleEnabled;
+  final List<VideoItem> originalQueue;
 
   VideoItem? get current =>
       queue.isEmpty || currentIndex < 0 || currentIndex >= queue.length
@@ -625,6 +662,11 @@ class PlaybackStateSummary {
       'positionMs': positionMs,
       'durationMs': durationMs,
       'isPlaying': isPlaying,
+      'repeatMode': repeatMode.name,
+      'shuffleEnabled': shuffleEnabled,
+      'originalQueueIds': (originalQueue.isEmpty ? queue : originalQueue)
+          .map((item) => item.id)
+          .toList(growable: false),
       'updatedAt': (updatedAt ?? DateTime.now()).toIso8601String(),
     };
   }
@@ -652,17 +694,30 @@ class PlaybackStateSummary {
     final currentIndex = currentIndexFromId >= 0
         ? currentIndexFromId
         : savedIndex.clamp(0, queue.length - 1).toInt();
+    final originalQueueIds =
+        (json['originalQueueIds'] as List?)?.whereType<String>().toList() ??
+        queueIds;
+    final originalQueue = originalQueueIds
+        .map((id) => libraryById[id])
+        .whereType<VideoItem>()
+        .toList(growable: false);
     return PlaybackStateSummary(
       queue: queue,
       currentIndex: currentIndex,
       isPlaying: json['isPlaying'] as bool? ?? false,
       positionMs: (json['positionMs'] as num?)?.toInt() ?? 0,
       durationMs: (json['durationMs'] as num?)?.toInt() ?? 0,
+      repeatMode: PlayerRepeatMode.values.firstWhere(
+        (value) => value.name == json['repeatMode'],
+        orElse: () => PlayerRepeatMode.all,
+      ),
+      shuffleEnabled: json['shuffleEnabled'] as bool? ?? false,
+      originalQueue: originalQueue,
     );
   }
 }
 
-enum DriveEntryType { folder, video }
+enum DriveEntryType { folder, video, subtitle }
 
 class DriveEntry {
   const DriveEntry({
@@ -691,8 +746,9 @@ class DriveEntry {
 
   bool get isFolder => type == DriveEntryType.folder;
   bool get isVideo => type == DriveEntryType.video;
+  bool get isSubtitle => type == DriveEntryType.subtitle;
 
-  VideoItem toVideoItem() {
+  VideoItem toVideoItem({SubtitleReference? subtitle}) {
     return VideoItem(
       id: 'drive:$id',
       title: name,
@@ -704,6 +760,7 @@ class DriveEntry {
       thumbnailUrl: thumbnailUrl,
       width: width,
       height: height,
+      subtitle: subtitle,
       addedAt: DateTime.now(),
     );
   }
@@ -713,6 +770,7 @@ class DriveImportResult {
   const DriveImportResult({
     required this.items,
     required this.sourceName,
+    required this.sourceFolders,
     required this.foldersScanned,
     required this.videosFound,
     required this.createPlaylist,
@@ -722,6 +780,7 @@ class DriveImportResult {
     return DriveImportResult(
       items: [entry.toVideoItem()],
       sourceName: entry.name,
+      sourceFolders: const {},
       foldersScanned: 0,
       videosFound: 1,
       createPlaylist: false,
@@ -730,6 +789,7 @@ class DriveImportResult {
 
   final List<VideoItem> items;
   final String sourceName;
+  final Map<String, String> sourceFolders;
   final int foldersScanned;
   final int videosFound;
   final bool createPlaylist;
@@ -747,6 +807,13 @@ class DriveImportProgress {
   final String currentFolderName;
 }
 
+class _CloudBackupEntry {
+  const _CloudBackupEntry({required this.file, required this.payload});
+
+  final DriveAppDataFile file;
+  final CloudBackupPayload payload;
+}
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -760,15 +827,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final _signIn = GoogleSignIn.instance;
   final _random = Random();
   final _searchController = TextEditingController();
+  late final DriveAppDataStore _driveAppData;
   Timer? _playbackSyncTimer;
+  Timer? _cloudPullTimer;
+  Timer? _cloudUploadDebounce;
   DateTime? _lastPlaybackStatePersistAt;
   DateTime? _lastDriveReconnectPromptAt;
   DateTime? _lastLocalPlaybackQueueUpdatedAt;
   String? _lastPersistedPlaybackMediaId;
   int? _lastPersistedPlaybackPositionMs;
   String? _lastPersistedPlaybackQueueSignature;
+  String? _lastNativePlaybackErrorSignature;
   String? _cloudQueueFileId;
+  String? _cloudLibraryFileId;
   String? _lastUploadedCloudQueueSignature;
+  String? _lastUploadedCloudLibrarySignature;
+  Completer<void>? _cloudSyncCompleter;
   String? _visibleVideosCacheKey;
   List<VideoItem>? _visibleVideosCache;
 
@@ -777,8 +851,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final List<VideoItem> _videos = [];
   final List<VideoPlaylist> _playlists = [];
   final List<String> _recentIds = [];
+  final List<RecentQueueSnapshot> _recentQueues = [];
+  final List<DriveImportRecord> _driveImports = [];
+  final List<DiagnosticEvent> _diagnosticEvents = [];
+  final Map<String, DateTime> _videoSyncUpdatedAt = {};
+  final Map<String, DateTime> _videoDeletedAt = {};
+  final Map<String, DateTime> _playlistDeletedAt = {};
   final Set<String> _selectedIds = {};
   PlaybackStateSummary? _playbackSummary;
+  CloudPlaybackState? _remoteQueueCandidate;
+  List<CloudPlaybackState> _knownDeviceQueues = const [];
+  SyncHealth _syncHealth = const SyncHealth();
+  String _deviceId = '';
+  String _deviceName = 'Android device';
+  String _appVersion = '1.0.0+1';
+  String _androidVersion = 'Unknown';
+  bool _diagnosticsUnlocked = false;
+  int _versionTapCount = 0;
+  DateTime? _resumePlaybackUpdatedAt;
+  DateTime? _lastCloudBackupAt;
+  PlaybackFailurePolicy _playbackFailurePolicy = PlaybackFailurePolicy.ask;
+  PlayerRepeatMode _repeatMode = PlayerRepeatMode.all;
+  bool _shuffleEnabled = false;
+  String _resizeMode = 'fit';
   LibraryTab _selectedTab = LibraryTab.all;
   String? _selectedPlaylistId;
   VideoSortMode _sortMode = VideoSortMode.recentlyAdded;
@@ -791,6 +886,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _searchActive = false;
   bool _refreshingDriveToken = false;
   bool _syncingCloudQueue = false;
+  bool _syncingCloudLibrary = false;
   bool _driveReconnectDialogOpen = false;
   String? _lastGoogleEmail;
   bool _driveAuthExpired = false;
@@ -821,6 +917,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    _driveAppData = DriveAppDataStore(tokenProvider: _provideDriveToken);
     WidgetsBinding.instance.addObserver(this);
     _searchController.addListener(() {
       setState(() => _query = _searchController.text.trim());
@@ -830,6 +927,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         unawaited(_syncPlaybackState());
       }
     });
+    _cloudPullTimer = Timer.periodic(const Duration(minutes: 5), (_) {
+      if (_accessToken != null && !_busy) {
+        unawaited(_syncAllCloudState(pullOnly: true));
+      }
+    });
     unawaited(_bootstrap());
   }
 
@@ -837,6 +939,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void dispose() {
     unawaited(_syncPlaybackState(forcePersist: true));
     _playbackSyncTimer?.cancel();
+    _cloudPullTimer?.cancel();
+    _cloudUploadDebounce?.cancel();
+    _driveAppData.close();
     WidgetsBinding.instance.removeObserver(this);
     _searchController.dispose();
     super.dispose();
@@ -855,7 +960,34 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _bootstrap() async {
     await _loadLibraryState();
+    await _loadPlatformInfo();
     await _initializeGoogleSignIn();
+  }
+
+  Future<void> _loadPlatformInfo() async {
+    try {
+      final info = await _playback.invokeMapMethod<String, Object?>(
+        'getPlatformInfo',
+      );
+      final model = info?['model'] as String?;
+      final appVersion = info?['appVersion'] as String?;
+      final androidVersion = info?['androidVersion'] as String?;
+      if (mounted) {
+        setState(() {
+          if (model != null && model.trim().isNotEmpty) {
+            _deviceName = model.trim();
+          }
+          if (appVersion != null && appVersion.isNotEmpty) {
+            _appVersion = appVersion;
+          }
+          if (androidVersion != null && androidVersion.isNotEmpty) {
+            _androidVersion = androidVersion;
+          }
+        });
+      }
+    } catch (_) {
+      // The persisted fallback remains usable on older native builds.
+    }
   }
 
   Future<void> _loadLibraryState() async {
@@ -875,6 +1007,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final lastGoogleEmail = prefs.getString(_prefsLastGoogleEmailKey);
     final driveAuthState = prefs.getString(_prefsDriveAuthStateKey);
     final resumePlayback = prefs.getBool(_prefsResumePlaybackKey) ?? true;
+    final persistedDeviceId = prefs.getString(_prefsDeviceIdKey);
+    final persistedDeviceName = prefs.getString(_prefsDeviceNameKey);
+    final syncMetadataJson = prefs.getString(_prefsCloudSyncMetadataKey);
+    final recentQueuesJson = prefs.getString(_prefsRecentQueuesKey);
+    final driveImportsJson = prefs.getString(_prefsDriveImportsKey);
+    final diagnosticsJson = prefs.getString(_prefsDiagnosticsKey);
+    final failurePolicyName = prefs.getString(_prefsPlaybackFailurePolicyKey);
+    final repeatModeName = prefs.getString(_prefsRepeatModeKey);
+    final shuffleEnabled = prefs.getBool(_prefsShuffleEnabledKey) ?? false;
+    final resizeMode = prefs.getString(_prefsResizeModeKey) ?? 'fit';
+    final resumePlaybackUpdatedAt = DateTime.tryParse(
+      prefs.getString(_prefsResumePlaybackUpdatedAtKey) ?? '',
+    );
+    final lastCloudBackupAt = DateTime.tryParse(
+      prefs.getString(_prefsLastCloudBackupAtKey) ?? '',
+    );
+    final generatedDeviceId =
+        persistedDeviceId ??
+        'android:${DateTime.now().microsecondsSinceEpoch}:${_random.nextInt(1 << 31)}';
 
     setState(() {
       if (videosJson != null && videosJson.isNotEmpty) {
@@ -928,6 +1079,88 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _lastGoogleEmail = lastGoogleEmail;
       _driveAuthExpired = driveAuthState == 'expired';
       _resumePlayback = resumePlayback;
+      _deviceId = generatedDeviceId;
+      _deviceName = persistedDeviceName?.trim().isNotEmpty == true
+          ? persistedDeviceName!.trim()
+          : 'Android device';
+      _resumePlaybackUpdatedAt =
+          resumePlaybackUpdatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      _lastCloudBackupAt = lastCloudBackupAt;
+      _playbackFailurePolicy = PlaybackFailurePolicy.values.firstWhere(
+        (value) => value.name == failurePolicyName,
+        orElse: () => PlaybackFailurePolicy.ask,
+      );
+      _repeatMode = PlayerRepeatMode.values.firstWhere(
+        (value) => value.name == repeatModeName,
+        orElse: () => PlayerRepeatMode.all,
+      );
+      _shuffleEnabled = shuffleEnabled;
+      _resizeMode = resizeMode;
+      if (syncMetadataJson != null && syncMetadataJson.isNotEmpty) {
+        try {
+          final metadata = Map<String, Object?>.from(
+            jsonDecode(syncMetadataJson) as Map,
+          );
+          _videoSyncUpdatedAt
+            ..clear()
+            ..addAll(_decodeDateMap(metadata['videoUpdatedAt']));
+          _videoDeletedAt
+            ..clear()
+            ..addAll(_decodeDateMap(metadata['videoDeletedAt']));
+          _playlistDeletedAt
+            ..clear()
+            ..addAll(_decodeDateMap(metadata['playlistDeletedAt']));
+        } catch (_) {
+          _videoSyncUpdatedAt.clear();
+          _videoDeletedAt.clear();
+          _playlistDeletedAt.clear();
+        }
+      }
+      if (recentQueuesJson != null && recentQueuesJson.isNotEmpty) {
+        try {
+          _recentQueues
+            ..clear()
+            ..addAll(
+              (jsonDecode(recentQueuesJson) as List).whereType<Map>().map(
+                (item) => RecentQueueSnapshot.fromJson(
+                  Map<String, Object?>.from(item),
+                ),
+              ),
+            );
+        } catch (_) {
+          _recentQueues.clear();
+        }
+      }
+      if (driveImportsJson != null && driveImportsJson.isNotEmpty) {
+        try {
+          _driveImports
+            ..clear()
+            ..addAll(
+              (jsonDecode(driveImportsJson) as List).whereType<Map>().map(
+                (item) => DriveImportRecord.fromJson(
+                  Map<String, Object?>.from(item),
+                  fallbackDeviceId: generatedDeviceId,
+                ),
+              ),
+            );
+        } catch (_) {
+          _driveImports.clear();
+        }
+      }
+      if (diagnosticsJson != null && diagnosticsJson.isNotEmpty) {
+        try {
+          _diagnosticEvents
+            ..clear()
+            ..addAll(
+              (jsonDecode(diagnosticsJson) as List).whereType<Map>().map(
+                (item) =>
+                    DiagnosticEvent.fromJson(Map<String, Object?>.from(item)),
+              ),
+            );
+        } catch (_) {
+          _diagnosticEvents.clear();
+        }
+      }
       if (playbackQueueJson != null && playbackQueueJson.isNotEmpty) {
         try {
           final decoded = Map<String, Object?>.from(
@@ -968,6 +1201,47 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await prefs.setString(_prefsTabBarPlacementKey, _tabBarPlacement.name);
     await prefs.setString(_prefsLanguageKey, _language.name);
     await prefs.setString(_prefsThemeKey, _themeChoice.name);
+    await prefs.setString(_prefsDeviceIdKey, _deviceId);
+    await prefs.setString(_prefsDeviceNameKey, _deviceName);
+    await prefs.setString(
+      _prefsCloudSyncMetadataKey,
+      jsonEncode({
+        'videoUpdatedAt': _encodeDateMap(_videoSyncUpdatedAt),
+        'videoDeletedAt': _encodeDateMap(_videoDeletedAt),
+        'playlistDeletedAt': _encodeDateMap(_playlistDeletedAt),
+      }),
+    );
+    await prefs.setString(
+      _prefsRecentQueuesKey,
+      jsonEncode(_recentQueues.map((item) => item.toJson()).toList()),
+    );
+    await prefs.setString(
+      _prefsDriveImportsKey,
+      jsonEncode(_driveImports.map((item) => item.toJson()).toList()),
+    );
+    await prefs.setString(
+      _prefsDiagnosticsKey,
+      jsonEncode(_diagnosticEvents.map((item) => item.toJson()).toList()),
+    );
+    await prefs.setString(
+      _prefsPlaybackFailurePolicyKey,
+      _playbackFailurePolicy.name,
+    );
+    await prefs.setString(_prefsRepeatModeKey, _repeatMode.name);
+    await prefs.setBool(_prefsShuffleEnabledKey, _shuffleEnabled);
+    await prefs.setString(_prefsResizeModeKey, _resizeMode);
+    await prefs.setString(
+      _prefsResumePlaybackUpdatedAtKey,
+      (_resumePlaybackUpdatedAt ?? DateTime.now()).toIso8601String(),
+    );
+    if (_lastCloudBackupAt == null) {
+      await prefs.remove(_prefsLastCloudBackupAtKey);
+    } else {
+      await prefs.setString(
+        _prefsLastCloudBackupAtKey,
+        _lastCloudBackupAt!.toUtc().toIso8601String(),
+      );
+    }
     final playbackSummary = _playbackSummary;
     if (playbackSummary == null || playbackSummary.queue.isEmpty) {
       await prefs.remove(_prefsPlaybackQueueStateKey);
@@ -993,6 +1267,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await prefs.setBool(_prefsResumePlaybackKey, _resumePlayback);
   }
 
+  Map<String, DateTime> _decodeDateMap(Object? value) {
+    if (value is! Map) return <String, DateTime>{};
+    final result = <String, DateTime>{};
+    for (final entry in value.entries) {
+      final parsed = DateTime.tryParse(entry.value?.toString() ?? '');
+      if (parsed != null) result[entry.key.toString()] = parsed;
+    }
+    return result;
+  }
+
+  Map<String, String> _encodeDateMap(Map<String, DateTime> value) => {
+    for (final entry in value.entries)
+      entry.key: entry.value.toUtc().toIso8601String(),
+  };
+
   Future<void> _syncPlaybackState({bool forcePersist = false}) async {
     try {
       if (!mounted || _videos.isEmpty) return;
@@ -1005,23 +1294,41 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         growable: false,
       );
       final mediaItemCount = (state['mediaItemCount'] as num?)?.toInt() ?? 0;
-      final authError = state['authError'] as bool? ?? false;
-      if (authError) {
-        unawaited(_recoverDrivePlaybackAuth());
-      }
+      _handleNativePlaybackError(state);
       if (mediaId == null || mediaItemCount <= 0) return;
 
       final positionMs = (state['positionMs'] as num?)?.toInt() ?? 0;
       final durationMs = (state['durationMs'] as num?)?.toInt() ?? 0;
       final isPlaying = state['isPlaying'] as bool? ?? false;
       final nativeIndex = (state['currentIndex'] as num?)?.toInt() ?? 0;
+      final nativeRepeatMode = _repeatModeFromNative(
+        (state['repeatMode'] as num?)?.toInt(),
+      );
+      final nativeShuffleEnabled =
+          state['shuffleEnabled'] as bool? ??
+          _playbackSummary?.shuffleEnabled ??
+          _shuffleEnabled;
       final savedPositionMs = durationMs > 0 && durationMs - positionMs <= 10000
           ? 0
           : positionMs;
 
+      final nativeSubtitle = state['subtitle'] is Map
+          ? SubtitleReference.fromJson(
+              Map<String, Object?>.from(state['subtitle'] as Map),
+            )
+          : null;
       final libraryIndex = _videos.indexWhere((item) => item.id == mediaId);
       final summary = _playbackSummary;
       final libraryById = {for (final item in _videos) item.id: item};
+      final existingItem = libraryById[mediaId];
+      final subtitleChanged =
+          nativeSubtitle != null &&
+          existingItem != null &&
+          (existingItem.subtitle?.uri != nativeSubtitle.uri ||
+              existingItem.subtitle?.mimeType != nativeSubtitle.mimeType);
+      if (subtitleChanged) {
+        libraryById[mediaId] = existingItem.copyWith(subtitle: nativeSubtitle);
+      }
       final shouldKeepSavedMultiQueue =
           queueIds != null &&
           queueIds.length <= 1 &&
@@ -1039,13 +1346,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (!mounted) return;
       setState(() {
         if (libraryIndex >= 0) {
-          _videos[libraryIndex] = _videos[libraryIndex].copyWith(
-            lastPositionMs: savedPositionMs,
-            duration: durationMs > 0
-                ? durationMs
-                : _videos[libraryIndex].duration,
-            lastPlayedAt: DateTime.now(),
-          );
+          _videos[libraryIndex] =
+              (libraryById[mediaId] ?? _videos[libraryIndex]).copyWith(
+                lastPositionMs: savedPositionMs,
+                duration: durationMs > 0
+                    ? durationMs
+                    : _videos[libraryIndex].duration,
+                lastPlayedAt: DateTime.now(),
+              );
           _invalidateVisibleVideos();
         }
         final syncedQueue =
@@ -1078,10 +1386,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             isPlaying: isPlaying,
             positionMs: resolvedPositionMs,
             durationMs: resolvedDurationMs,
+            repeatMode: nativeRepeatMode,
+            shuffleEnabled: nativeShuffleEnabled,
+            originalQueue: summary?.originalQueue ?? const [],
           );
+          _repeatMode = nativeRepeatMode;
+          _shuffleEnabled = nativeShuffleEnabled;
         }
       });
-      if (shouldPersist) {
+      if (shouldPersist || subtitleChanged) {
+        if (libraryIndex >= 0 &&
+            _videos[libraryIndex].source == VideoSource.drive) {
+          _markCloudVideoChanged(mediaId);
+        }
         _rememberPersistedPlaybackSnapshot(
           mediaId,
           savedPositionMs,
@@ -1089,11 +1406,54 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         );
         await _saveLibraryState();
         unawaited(_syncPlaybackQueueToDrive());
+        _scheduleCloudLibrarySync();
       }
     } catch (_) {
       // Sync is opportunistic; playback controls still work if the session is gone.
     }
   }
+
+  void _handleNativePlaybackError(Map<String, Object?> state) {
+    final kindName = state['lastErrorKind'] as String?;
+    final authError = state['authError'] as bool? ?? false;
+    if (kindName == null && !authError) {
+      _lastNativePlaybackErrorSignature = null;
+      return;
+    }
+    final resolvedName = kindName ?? 'authRequired';
+    final message = state['lastErrorMessage'] as String? ?? resolvedName;
+    final mediaId = state['lastErrorMediaId'] as String? ?? '';
+    final signature = '$resolvedName\u001f$mediaId\u001f$message';
+    if (_lastNativePlaybackErrorSignature == signature) return;
+    _lastNativePlaybackErrorSignature = signature;
+    final kind = _driveFailureKindFromNative(resolvedName);
+    _recordDiagnostic(
+      'playback',
+      message,
+      failureKind: kind,
+      httpStatus: (state['httpStatusCode'] as num?)?.toInt(),
+    );
+    if (kind == DriveFailureKind.authRequired || authError) {
+      unawaited(_recoverDrivePlaybackAuth());
+    }
+  }
+
+  DriveFailureKind _driveFailureKindFromNative(String value) => switch (value) {
+    'authRequired' => DriveFailureKind.authRequired,
+    'accessDenied' => DriveFailureKind.accessDenied,
+    'fileMissing' => DriveFailureKind.fileMissing,
+    'network' => DriveFailureKind.network,
+    'rateLimited' => DriveFailureKind.rateLimited,
+    'server' => DriveFailureKind.server,
+    _ => DriveFailureKind.unknown,
+  };
+
+  PlayerRepeatMode _repeatModeFromNative(int? mode) => switch (mode) {
+    0 => PlayerRepeatMode.off,
+    1 => PlayerRepeatMode.one,
+    2 => PlayerRepeatMode.all,
+    _ => _playbackSummary?.repeatMode ?? _repeatMode,
+  };
 
   bool _shouldPersistPlaybackSnapshot(
     String mediaId,
@@ -1133,6 +1493,530 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _rememberPlaybackQueueChanged() {
     _lastLocalPlaybackQueueUpdatedAt = DateTime.now();
+    final summary = _playbackSummary;
+    if (summary != null && summary.queue.isNotEmpty) {
+      _recordRecentQueue(summary);
+    }
+  }
+
+  Future<String?> _provideDriveToken({required bool forceRefresh}) async {
+    if (forceRefresh) {
+      await _refreshDriveAccessTokenSilently(clearCurrentToken: true);
+    } else if (_accessToken == null || _accessToken!.isEmpty) {
+      await _refreshDriveAccessTokenSilently();
+    }
+    return _accessToken;
+  }
+
+  void _recordDiagnostic(
+    String category,
+    String message, {
+    DriveFailureKind? failureKind,
+    int? httpStatus,
+  }) {
+    final sanitized = message
+        .replaceAll(RegExp(r'https?://\S+'), '<url>')
+        .replaceAll(RegExp(r'[\w.+-]+@[\w.-]+'), '<account>');
+    _diagnosticEvents.insert(
+      0,
+      DiagnosticEvent(
+        timestamp: DateTime.now(),
+        category: category,
+        message: sanitized,
+        failureKind: failureKind,
+        httpStatus: httpStatus,
+      ),
+    );
+    if (_diagnosticEvents.length > 50) {
+      _diagnosticEvents.removeRange(50, _diagnosticEvents.length);
+    }
+  }
+
+  String _driveFailureMessage(DriveFailureKind kind) => switch (kind) {
+    DriveFailureKind.authRequired => t.reconnectDrivePrompt,
+    DriveFailureKind.accessDenied =>
+      _language == AppLanguage.ko
+          ? '\uC774 \uACC4\uC815\uC73C\uB85C \uC811\uADFC \uAD8C\uD55C\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.'
+          : 'This account does not have access.',
+    DriveFailureKind.fileMissing =>
+      _language == AppLanguage.ko
+          ? 'Drive\uC5D0\uC11C \uD30C\uC77C\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.'
+          : 'The file could not be found in Drive.',
+    DriveFailureKind.network =>
+      _language == AppLanguage.ko
+          ? '\uC778\uD130\uB137 \uC5F0\uACB0 \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD574 \uC8FC\uC138\uC694.'
+          : 'Connect to the internet and try again.',
+    DriveFailureKind.rateLimited =>
+      _language == AppLanguage.ko
+          ? 'Drive \uC694\uCCAD\uC774 \uB9CE\uC544 \uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD569\uB2C8\uB2E4.'
+          : 'Drive is busy. Try again shortly.',
+    DriveFailureKind.server =>
+      _language == AppLanguage.ko
+          ? 'Drive \uC11C\uBC84 \uC624\uB958\uC785\uB2C8\uB2E4. \uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD558\uC138\uC694.'
+          : 'Drive server error. Try again shortly.',
+    DriveFailureKind.unknown => t.unknownError,
+  };
+
+  void _setSyncFailure(DriveApiException error) {
+    final phase = error.kind == DriveFailureKind.authRequired
+        ? SyncPhase.reconnectRequired
+        : error.kind == DriveFailureKind.network
+        ? SyncPhase.offline
+        : SyncPhase.failed;
+    if (mounted) {
+      setState(() {
+        _syncHealth = _syncHealth.copyWith(
+          phase: phase,
+          lastAttemptAt: DateTime.now(),
+          failureKind: error.kind,
+          httpStatus: error.statusCode,
+          message: _driveFailureMessage(error.kind),
+          retryable: error.retryable,
+        );
+      });
+    }
+    _recordDiagnostic(
+      'sync',
+      error.message,
+      failureKind: error.kind,
+      httpStatus: error.statusCode,
+    );
+    if (error.kind == DriveFailureKind.authRequired) {
+      unawaited(_promptDriveReconnect(forceCloudQueueSync: true));
+    }
+  }
+
+  void _markCloudVideoChanged(String videoId, {DateTime? at}) {
+    final timestamp = at ?? DateTime.now();
+    _videoSyncUpdatedAt[videoId] = timestamp;
+    _videoDeletedAt.remove(videoId);
+  }
+
+  void _markCloudVideoDeleted(String videoId, {DateTime? at}) {
+    final timestamp = at ?? DateTime.now();
+    _videoSyncUpdatedAt[videoId] = timestamp;
+    _videoDeletedAt[videoId] = timestamp;
+  }
+
+  void _scheduleCloudLibrarySync() {
+    _cloudUploadDebounce?.cancel();
+    _cloudUploadDebounce = Timer(const Duration(seconds: 3), () {
+      if (_accessToken != null && _accessToken!.isNotEmpty) {
+        unawaited(_syncAllCloudState());
+      }
+    });
+  }
+
+  Future<void> _syncAllCloudState({bool pullOnly = false}) async {
+    final inFlight = _cloudSyncCompleter;
+    if (inFlight != null) return inFlight.future;
+    if (_accessToken == null || _accessToken!.isEmpty) return;
+    final completer = Completer<void>();
+    _cloudSyncCompleter = completer;
+    if (mounted) {
+      setState(() {
+        _syncHealth = _syncHealth.copyWith(
+          phase: SyncPhase.syncing,
+          lastAttemptAt: DateTime.now(),
+          clearFailure: true,
+        );
+      });
+    }
+    try {
+      await _syncCloudLibrary(pullOnly: pullOnly);
+      await _syncPlaybackQueueFromDrive(force: pullOnly);
+      if (mounted) {
+        setState(() {
+          _syncHealth = _syncHealth.copyWith(
+            phase: SyncPhase.synced,
+            lastSuccessAt: DateTime.now(),
+            clearFailure: true,
+          );
+        });
+      }
+      _recordDiagnostic('sync', 'Cloud state synchronized.');
+      await _saveLibraryState();
+      unawaited(_maybeCreateDailyBackup());
+      completer.complete();
+    } on DriveApiException catch (error) {
+      _setSyncFailure(error);
+      completer.complete();
+    } catch (error) {
+      final wrapped = DriveApiException(
+        kind: DriveFailureKind.unknown,
+        message: 'Cloud synchronization failed: $error',
+      );
+      _setSyncFailure(wrapped);
+      completer.complete();
+    } finally {
+      _cloudSyncCompleter = null;
+    }
+  }
+
+  CloudVideoState _cloudVideoState(VideoItem item) {
+    final updatedAt =
+        _videoSyncUpdatedAt[item.id] ??
+        item.lastPlayedAt ??
+        item.addedAt ??
+        item.modifiedTime ??
+        DateTime.fromMillisecondsSinceEpoch(0);
+    return CloudVideoState(
+      id: item.id,
+      title: item.title,
+      uri: item.uri,
+      size: item.size,
+      modifiedTime: item.modifiedTime,
+      durationMs: item.duration,
+      addedAt: item.addedAt,
+      lastPlayedAt: item.lastPlayedAt,
+      lastPositionMs: item.lastPositionMs,
+      isFavorite: item.isFavorite,
+      thumbnailUrl: item.thumbnailUrl,
+      width: item.width,
+      height: item.height,
+      updatedAt: updatedAt,
+      updatedByDeviceId: _deviceId,
+      driveSubtitle: item.subtitle?.isDrive == true ? item.subtitle : null,
+    );
+  }
+
+  CloudLibraryState _buildLocalCloudLibraryState() {
+    final now = DateTime.now();
+    final videos = _videos
+        .where((item) => item.source == VideoSource.drive)
+        .map(_cloudVideoState)
+        .toList();
+    final knownVideoIds = videos.map((item) => item.id).toSet();
+    for (final entry in _videoDeletedAt.entries) {
+      if (knownVideoIds.contains(entry.key)) continue;
+      videos.add(
+        CloudVideoState(
+          id: entry.key,
+          title: '',
+          uri: '',
+          updatedAt: entry.value,
+          updatedByDeviceId: _deviceId,
+          deletedAt: entry.value,
+        ),
+      );
+    }
+
+    final playlists = _playlists.map((playlist) {
+      final driveIds = playlist.videoIds
+          .where((id) {
+            final item = _videos.where((video) => video.id == id).firstOrNull;
+            return item?.source == VideoSource.drive;
+          })
+          .toList(growable: false);
+      return CloudPlaylistState(
+        id: playlist.id,
+        name: playlist.name,
+        driveVideoIds: driveIds,
+        createdAt: playlist.createdAt,
+        updatedAt: playlist.updatedAt,
+        updatedByDeviceId: _deviceId,
+        sourceLabel: playlist.sourceLabel,
+      );
+    }).toList();
+    final knownPlaylistIds = playlists.map((item) => item.id).toSet();
+    for (final entry in _playlistDeletedAt.entries) {
+      if (knownPlaylistIds.contains(entry.key)) continue;
+      playlists.add(
+        CloudPlaylistState(
+          id: entry.key,
+          name: '',
+          driveVideoIds: const [],
+          createdAt: entry.value,
+          updatedAt: entry.value,
+          updatedByDeviceId: _deviceId,
+          sourceLabel: '',
+          deletedAt: entry.value,
+        ),
+      );
+    }
+
+    final cloudRecentQueues = _recentQueues
+        .map((queue) {
+          final driveIds = queue.queueIds
+              .where((id) {
+                final item = _videos
+                    .where((video) => video.id == id)
+                    .firstOrNull;
+                return item?.source == VideoSource.drive;
+              })
+              .toList(growable: false);
+          if (driveIds.isEmpty) return null;
+          final currentId = driveIds.contains(queue.currentVideoId)
+              ? queue.currentVideoId
+              : driveIds.first;
+          final originalDriveIds = queue.originalQueueIds
+              .where(driveIds.contains)
+              .toList(growable: false);
+          return RecentQueueSnapshot(
+            id: '${queue.deviceId}:${queueSignature(driveIds)}',
+            deviceId: queue.deviceId,
+            deviceName: queue.deviceName,
+            title: queue.title,
+            queueIds: driveIds,
+            originalQueueIds: originalDriveIds.isEmpty
+                ? driveIds
+                : originalDriveIds,
+            currentIndex: driveIds.indexOf(currentId!),
+            currentVideoId: currentId,
+            positionMs: queue.positionMs,
+            durationMs: queue.durationMs,
+            repeatMode: queue.repeatMode,
+            shuffleEnabled: queue.shuffleEnabled,
+            updatedAt: queue.updatedAt,
+          );
+        })
+        .whereType<RecentQueueSnapshot>()
+        .toList(growable: false);
+
+    return CloudLibraryState(
+      deviceId: _deviceId,
+      deviceName: _deviceName,
+      platform: 'android',
+      updatedAt: now,
+      videos: videos,
+      playlists: playlists,
+      imports: _driveImports,
+      recentQueues: cloudRecentQueues,
+      resumePlayback: CloudSettingValue<bool>(
+        value: _resumePlayback,
+        updatedAt: _resumePlaybackUpdatedAt ?? now,
+        updatedByDeviceId: _deviceId,
+      ),
+    );
+  }
+
+  String _cloudLibrarySignature(CloudLibraryState state) {
+    final videos = [...state.videos]..sort((a, b) => a.id.compareTo(b.id));
+    final playlists = [...state.playlists]
+      ..sort((a, b) => a.id.compareTo(b.id));
+    final imports = [...state.imports]..sort((a, b) => a.id.compareTo(b.id));
+    final queues = [...state.recentQueues]
+      ..sort((a, b) => a.id.compareTo(b.id));
+    return jsonEncode({
+      'videos': videos.map((item) => item.toJson()).toList(),
+      'playlists': playlists.map((item) => item.toJson()).toList(),
+      'imports': imports.map((item) => item.toJson()).toList(),
+      'recentQueues': queues.map((item) => item.toJson()).toList(),
+      'resumePlayback': state.resumePlayback.toJson(),
+    });
+  }
+
+  Future<void> _syncCloudLibrary({bool pullOnly = false}) async {
+    if (_syncingCloudLibrary) return;
+    _syncingCloudLibrary = true;
+    try {
+      final ownName = '$_cloudLibraryPrefix$_deviceId.json';
+      final files = await _driveAppData.listFiles(
+        namePrefix: _cloudLibraryPrefix,
+      );
+      final states = <CloudLibraryState>[];
+      for (final file in files) {
+        try {
+          final json = await _driveAppData.readJsonFile(file.id);
+          if (json == null) continue;
+          states.add(CloudLibraryState.fromJson(json));
+          if (file.name == ownName) _cloudLibraryFileId = file.id;
+        } catch (error) {
+          _recordDiagnostic('sync', 'Ignored invalid cloud library state.');
+        }
+      }
+      final local = _buildLocalCloudLibraryState();
+      final merged = CloudLibraryState.merge(
+        [...states, local],
+        outputDeviceId: _deviceId,
+        outputDeviceName: _deviceName,
+        outputPlatform: 'android',
+      );
+      _applyMergedCloudLibrary(merged);
+      final signature = _cloudLibrarySignature(merged);
+      if (!pullOnly && signature != _lastUploadedCloudLibrarySignature) {
+        _cloudLibraryFileId = await _driveAppData.upsertJsonFile(
+          name: ownName,
+          knownFileId: _cloudLibraryFileId,
+          json: merged.toJson(),
+        );
+        _lastUploadedCloudLibrarySignature = signature;
+      }
+    } finally {
+      _syncingCloudLibrary = false;
+    }
+  }
+
+  void _applyMergedCloudLibrary(CloudLibraryState merged) {
+    if (!mounted) return;
+    setState(() {
+      final existingById = {for (final item in _videos) item.id: item};
+      for (final cloud in merged.videos) {
+        _videoSyncUpdatedAt[cloud.id] = cloud.updatedAt;
+        if (cloud.isDeleted) {
+          _videoDeletedAt[cloud.id] = cloud.deletedAt!;
+          _videos.removeWhere(
+            (item) => item.id == cloud.id && item.source == VideoSource.drive,
+          );
+          continue;
+        }
+        _videoDeletedAt.remove(cloud.id);
+        final existing = existingById[cloud.id];
+        if (existing == null) {
+          _videos.add(_videoItemFromCloud(cloud));
+        } else if (existing.source == VideoSource.drive) {
+          final index = _videos.indexWhere((item) => item.id == cloud.id);
+          if (index >= 0) {
+            _videos[index] = existing.copyWith(
+              title: cloud.title,
+              uri: cloud.uri,
+              size: cloud.size,
+              modifiedTime: cloud.modifiedTime,
+              duration: cloud.durationMs,
+              addedAt: cloud.addedAt,
+              lastPlayedAt: cloud.lastPlayedAt,
+              lastPositionMs: cloud.lastPositionMs,
+              isFavorite: cloud.isFavorite,
+              thumbnailUrl: cloud.thumbnailUrl,
+              width: cloud.width,
+              height: cloud.height,
+              subtitle: cloud.driveSubtitle ?? existing.subtitle,
+            );
+          }
+        }
+      }
+
+      final videoById = {for (final item in _videos) item.id: item};
+      for (final cloud in merged.playlists) {
+        if (cloud.isDeleted) {
+          _playlistDeletedAt[cloud.id] = cloud.deletedAt!;
+          _playlists.removeWhere((item) => item.id == cloud.id);
+          continue;
+        }
+        _playlistDeletedAt.remove(cloud.id);
+        final index = _playlists.indexWhere((item) => item.id == cloud.id);
+        final localIds = index < 0
+            ? const <String>[]
+            : _playlists[index].videoIds
+                  .where((id) => videoById[id]?.source == VideoSource.local)
+                  .toList(growable: false);
+        final driveIds = cloud.driveVideoIds
+            .where((id) => videoById[id]?.source == VideoSource.drive)
+            .toList(growable: false);
+        final playlist = VideoPlaylist(
+          id: cloud.id,
+          name: cloud.name,
+          videoIds: [...driveIds, ...localIds],
+          createdAt: cloud.createdAt,
+          updatedAt: cloud.updatedAt,
+          sourceLabel: cloud.sourceLabel,
+        );
+        if (index < 0) {
+          _playlists.add(playlist);
+        } else {
+          _playlists[index] = playlist;
+        }
+      }
+      _driveImports
+        ..clear()
+        ..addAll(merged.imports);
+      _recentQueues
+        ..clear()
+        ..addAll(merged.recentQueues);
+      if (merged.resumePlayback.updatedAt.isAfter(
+        _resumePlaybackUpdatedAt ?? DateTime.fromMillisecondsSinceEpoch(0),
+      )) {
+        _resumePlayback = merged.resumePlayback.value;
+        _resumePlaybackUpdatedAt = merged.resumePlayback.updatedAt;
+      }
+      final recentVideos =
+          _videos.where((item) => item.lastPlayedAt != null).toList()
+            ..sort((a, b) => b.lastPlayedAt!.compareTo(a.lastPlayedAt!));
+      _recentIds
+        ..clear()
+        ..addAll(recentVideos.map((item) => item.id));
+      if (_recentIds.length > 50) {
+        _recentIds.removeRange(50, _recentIds.length);
+      }
+      _invalidateVisibleVideos();
+    });
+  }
+
+  VideoItem _videoItemFromCloud(CloudVideoState cloud) {
+    return VideoItem(
+      id: cloud.id,
+      title: cloud.title,
+      uri: cloud.uri,
+      source: VideoSource.drive,
+      size: cloud.size,
+      modifiedTime: cloud.modifiedTime,
+      duration: cloud.durationMs,
+      addedAt: cloud.addedAt,
+      lastPlayedAt: cloud.lastPlayedAt,
+      lastPositionMs: cloud.lastPositionMs,
+      isFavorite: cloud.isFavorite,
+      thumbnailUrl: cloud.thumbnailUrl,
+      width: cloud.width,
+      height: cloud.height,
+      subtitle: cloud.driveSubtitle,
+    );
+  }
+
+  RecentQueueSnapshot _queueSnapshot(
+    PlaybackStateSummary summary, {
+    bool driveOnly = false,
+  }) {
+    final queue = driveOnly
+        ? summary.queue
+              .where((item) => item.source == VideoSource.drive)
+              .toList(growable: false)
+        : summary.queue;
+    final current = summary.current;
+    final currentId =
+        current != null && queue.any((item) => item.id == current.id)
+        ? current.id
+        : queue.firstOrNull?.id;
+    final queueIds = queue.map((item) => item.id).toList(growable: false);
+    final originalSource = summary.originalQueue.isEmpty
+        ? summary.queue
+        : summary.originalQueue;
+    final originalIds = originalSource
+        .where((item) => !driveOnly || item.source == VideoSource.drive)
+        .map((item) => item.id)
+        .where(queueIds.contains)
+        .toList(growable: false);
+    final updatedAt = _lastLocalPlaybackQueueUpdatedAt ?? DateTime.now();
+    return RecentQueueSnapshot(
+      id: '$_deviceId:${queueSignature(queueIds)}',
+      deviceId: _deviceId,
+      deviceName: _deviceName,
+      title: current?.title,
+      queueIds: queueIds,
+      originalQueueIds: originalIds.isEmpty ? queueIds : originalIds,
+      currentIndex: currentId == null ? 0 : queueIds.indexOf(currentId),
+      currentVideoId: currentId,
+      positionMs: summary.positionMs,
+      durationMs: summary.durationMs,
+      repeatMode: summary.repeatMode,
+      shuffleEnabled: summary.shuffleEnabled,
+      updatedAt: updatedAt,
+    );
+  }
+
+  void _recordRecentQueue(PlaybackStateSummary summary) {
+    if (summary.queue.isEmpty || _deviceId.isEmpty) return;
+    final snapshot = _queueSnapshot(summary);
+    _recentQueues.removeWhere(
+      (item) =>
+          item.deviceId == _deviceId && item.signature == snapshot.signature,
+    );
+    _recentQueues.insert(0, snapshot);
+    var localCount = 0;
+    _recentQueues.removeWhere((item) {
+      if (item.deviceId != _deviceId) return false;
+      localCount += 1;
+      return localCount > 10;
+    });
   }
 
   Future<void> _syncPlaybackQueueFromDrive({bool force = false}) async {
@@ -1141,61 +2025,52 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     _syncingCloudQueue = true;
     try {
-      final fileId = await _findCloudPlaybackQueueFileId();
-      if (fileId == null) return;
-      _cloudQueueFileId = fileId;
-      final response = await _driveRequestWithAuth((token) {
-        return http
-            .get(
-              Uri.https('www.googleapis.com', '/drive/v3/files/$fileId', {
-                'alt': 'media',
-              }),
-              headers: {'Authorization': 'Bearer $token'},
-            )
-            .timeout(const Duration(seconds: 12));
-      });
-      if (response.statusCode < 200 || response.statusCode >= 300) return;
-      final cloud = Map<String, Object?>.from(jsonDecode(response.body) as Map);
-      final cloudUpdatedAt = DateTime.tryParse(
-        cloud['updatedAt'] as String? ?? '',
+      final ownName = '$_cloudQueuePrefix$_deviceId.json';
+      final files = await _driveAppData.listFiles(
+        namePrefix: _cloudQueuePrefix,
       );
+      final legacyFiles = await _driveAppData.listFiles(
+        exactName: _cloudPlaybackQueueFileName,
+      );
+      final states = <CloudPlaybackState>[];
+      for (final file in [...files, ...legacyFiles]) {
+        try {
+          final json = await _driveAppData.readJsonFile(file.id);
+          if (json == null) continue;
+          final state = CloudPlaybackState.fromJson(json);
+          states.add(state);
+          if (file.name == ownName) _cloudQueueFileId = file.id;
+        } catch (_) {
+          _recordDiagnostic('queue', 'Ignored invalid cloud queue state.');
+        }
+      }
+      states.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+      if (!mounted) return;
+      setState(() => _knownDeviceQueues = states);
+      final latestRemote = CloudPlaybackState.latest(
+        states.where((item) => item.deviceId != _deviceId),
+      );
+      if (latestRemote == null) return;
+      _mergeQueueItemsIntoLibrary(latestRemote.queueItems);
       final localUpdatedAt = _lastLocalPlaybackQueueUpdatedAt;
-      if (cloudUpdatedAt == null ||
-          (!force &&
-              localUpdatedAt != null &&
-              !cloudUpdatedAt.isAfter(localUpdatedAt))) {
+      if (!force &&
+          localUpdatedAt != null &&
+          !latestRemote.updatedAt.isAfter(localUpdatedAt)) {
         return;
       }
-      final queueItems = (cloud['queueItems'] as List? ?? const [])
-          .whereType<Map>()
-          .map((item) => VideoItem.fromJson(Map<String, Object?>.from(item)))
-          .where((item) => item.source == VideoSource.drive)
-          .toList(growable: false);
-      if (queueItems.isNotEmpty && mounted) {
-        setState(() {
-          final knownIds = _videos.map((item) => item.id).toSet();
-          _videos.addAll(queueItems.where((item) => knownIds.add(item.id)));
-        });
+      final localSignature = _playbackSummary == null
+          ? null
+          : queueSignature(_playbackSummary!.queue.map((item) => item.id));
+      if (localSignature == latestRemote.queue.signature) {
+        if (!await _hasActiveNativePlayback()) {
+          _applyRemoteQueue(latestRemote, updateOnly: true);
+        }
+      } else {
+        setState(() => _remoteQueueCandidate = latestRemote);
       }
-      final queueState = Map<String, Object?>.from(
-        cloud['queueState'] as Map? ?? const {},
-      );
-      final restored = PlaybackStateSummary.fromQueueStateJson(
-        queueState,
-        _videos,
-      );
-      if (!mounted) return;
-      setState(() {
-        _playbackSummary = restored;
-        _lastLocalPlaybackQueueUpdatedAt = cloudUpdatedAt;
-        _status = restored?.current == null
-            ? _status
-            : t.playing(restored!.current!.title);
-      });
       await _saveLibraryState();
-      _lastUploadedCloudQueueSignature = _cloudQueueSignature();
-    } catch (_) {
-      // Queue sync is opportunistic; local playback remains the source of truth.
+    } on DriveApiException catch (error) {
+      _setSyncFailure(error);
     } finally {
       _syncingCloudQueue = false;
     }
@@ -1206,36 +2081,46 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
     final summary = _playbackSummary;
-    if ((summary == null || summary.queue.isEmpty) && !allowEmpty) return;
+    if (summary == null || summary.queue.isEmpty) {
+      if (allowEmpty && _cloudQueueFileId != null) {
+        try {
+          await _driveAppData.deleteFile(_cloudQueueFileId!);
+          _cloudQueueFileId = null;
+          _lastUploadedCloudQueueSignature = null;
+        } on DriveApiException catch (error) {
+          _setSyncFailure(error);
+        }
+      }
+      return;
+    }
+    if (summary.current?.source != VideoSource.drive) return;
+    final driveSnapshot = _queueSnapshot(summary, driveOnly: true);
+    if (driveSnapshot.queueIds.isEmpty) return;
     final signature = _cloudQueueSignature();
     if (signature == _lastUploadedCloudQueueSignature) return;
     _syncingCloudQueue = true;
     try {
-      final now = _lastLocalPlaybackQueueUpdatedAt ?? DateTime.now();
-      final queueState = summary?.toQueueStateJson(updatedAt: now);
-      final payload = <String, Object?>{
-        'schemaVersion': 1,
-        'updatedAt': now.toIso8601String(),
-        'accountEmail': _user?.email,
-        'queueState': queueState,
-        'queueItems':
-            summary?.queue
-                .where((item) => item.source == VideoSource.drive)
-                .map((item) => item.toJson())
-                .toList(growable: false) ??
-            const [],
-      };
-      final body = jsonEncode(payload);
-      final fileId = _cloudQueueFileId ?? await _findCloudPlaybackQueueFileId();
-      if (fileId == null) {
-        _cloudQueueFileId = await _createCloudPlaybackQueueFile(body);
-      } else {
-        _cloudQueueFileId = fileId;
-        await _updateCloudPlaybackQueueFile(fileId, body);
-      }
+      final payload = CloudPlaybackState(
+        deviceId: _deviceId,
+        deviceName: _deviceName,
+        platform: 'android',
+        updatedAt: driveSnapshot.updatedAt,
+        queue: driveSnapshot,
+        queueItems: summary.queue
+            .where((item) => item.source == VideoSource.drive)
+            .map(_cloudVideoState)
+            .toList(growable: false),
+      );
+      _cloudQueueFileId = await _driveAppData.upsertJsonFile(
+        name: '$_cloudQueuePrefix$_deviceId.json',
+        knownFileId: _cloudQueueFileId,
+        json: payload.toJson(),
+      );
       _lastUploadedCloudQueueSignature = signature;
-    } catch (_) {
-      // Sync failures should never interrupt playback.
+      _recordRecentQueue(summary);
+      _scheduleCloudLibrarySync();
+    } on DriveApiException catch (error) {
+      _setSyncFailure(error);
     } finally {
       _syncingCloudQueue = false;
     }
@@ -1251,100 +2136,263 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       summary.currentIndex,
       summary.positionMs,
       summary.isPlaying,
+      summary.repeatMode.name,
+      summary.shuffleEnabled,
       ...summary.queue.map((item) => item.id),
+      '|original|',
+      ...(summary.originalQueue.isEmpty ? summary.queue : summary.originalQueue)
+          .map((item) => item.id),
     ].join('\u001f');
   }
 
-  Future<String?> _findCloudPlaybackQueueFileId() async {
-    final query =
-        "name='$_cloudPlaybackQueueFileName' and "
-        "'appDataFolder' in parents and trashed=false";
-    final url = Uri.https('www.googleapis.com', '/drive/v3/files', {
-      'spaces': 'appDataFolder',
-      'q': query,
-      'pageSize': '1',
-      'fields': 'files(id,name,modifiedTime)',
-    });
-    final response = await _driveRequestWithAuth((token) {
-      return http
-          .get(url, headers: {'Authorization': 'Bearer $token'})
-          .timeout(const Duration(seconds: 12));
-    });
-    if (response.statusCode < 200 || response.statusCode >= 300) return null;
-    final body = jsonDecode(response.body) as Map<String, Object?>;
-    final files = body['files'] as List? ?? const [];
-    if (files.isEmpty) return null;
-    return (files.first as Map)['id'] as String?;
-  }
-
-  Future<String?> _createCloudPlaybackQueueFile(String body) async {
-    final boundary = 'cloudQueue${DateTime.now().microsecondsSinceEpoch}';
-    final metadata = jsonEncode({
-      'name': _cloudPlaybackQueueFileName,
-      'parents': ['appDataFolder'],
-    });
-    final multipartBody =
-        '--$boundary\r\n'
-        'Content-Type: application/json; charset=UTF-8\r\n\r\n'
-        '$metadata\r\n'
-        '--$boundary\r\n'
-        'Content-Type: application/json; charset=UTF-8\r\n\r\n'
-        '$body\r\n'
-        '--$boundary--';
-    final response = await _driveRequestWithAuth((token) {
-      return http
-          .post(
-            Uri.https('www.googleapis.com', '/upload/drive/v3/files', {
-              'uploadType': 'multipart',
-              'fields': 'id',
-            }),
-            headers: {
-              'Authorization': 'Bearer $token',
-              'Content-Type': 'multipart/related; boundary=$boundary',
-            },
-            body: multipartBody,
-          )
-          .timeout(const Duration(seconds: 12));
-    });
-    if (response.statusCode < 200 || response.statusCode >= 300) return null;
-    final json = jsonDecode(response.body) as Map<String, Object?>;
-    return json['id'] as String?;
-  }
-
-  Future<void> _updateCloudPlaybackQueueFile(String fileId, String body) async {
-    await _driveRequestWithAuth((token) {
-      return http
-          .patch(
-            Uri.https('www.googleapis.com', '/upload/drive/v3/files/$fileId', {
-              'uploadType': 'media',
-            }),
-            headers: {
-              'Authorization': 'Bearer $token',
-              'Content-Type': 'application/json; charset=UTF-8',
-            },
-            body: body,
-          )
-          .timeout(const Duration(seconds: 12));
-    });
-  }
-
-  Future<http.Response> _driveRequestWithAuth(
-    Future<http.Response> Function(String token) request,
-  ) async {
-    var token = _accessToken;
-    if (token == null || token.isEmpty) {
-      throw StateError(t.drivePermissionExpired);
+  Future<bool> _hasActiveNativePlayback() async {
+    try {
+      final state = await _playback.invokeMapMethod<String, Object?>(
+        'getPlaybackState',
+      );
+      final count = (state?['mediaItemCount'] as num?)?.toInt() ?? 0;
+      final playing = state?['isPlaying'] as bool? ?? false;
+      return count > 0 && playing;
+    } catch (_) {
+      return false;
     }
-    var response = await request(token);
-    if (response.statusCode != 401 && response.statusCode != 403) {
-      return response;
+  }
+
+  void _mergeQueueItemsIntoLibrary(List<CloudVideoState> items) {
+    if (!mounted || items.isEmpty) return;
+    setState(() {
+      final knownIds = _videos.map((item) => item.id).toSet();
+      for (final item in items) {
+        if (item.isDeleted || !knownIds.add(item.id)) continue;
+        _videos.add(_videoItemFromCloud(item));
+        _videoSyncUpdatedAt[item.id] = item.updatedAt;
+      }
+      _invalidateVisibleVideos();
+    });
+  }
+
+  void _applyRemoteQueue(CloudPlaybackState remote, {bool updateOnly = false}) {
+    _mergeQueueItemsIntoLibrary(remote.queueItems);
+    final byId = {for (final item in _videos) item.id: item};
+    final queue = remote.queue.queueIds
+        .map((id) => byId[id])
+        .whereType<VideoItem>()
+        .toList(growable: false);
+    if (queue.isEmpty) return;
+    final originalQueue = remote.queue.originalQueueIds
+        .map((id) => byId[id])
+        .whereType<VideoItem>()
+        .toList(growable: false);
+    final currentIndex = remote.queue.currentVideoId == null
+        ? remote.queue.currentIndex.clamp(0, queue.length - 1)
+        : queue.indexWhere((item) => item.id == remote.queue.currentVideoId);
+    final safeIndex = currentIndex < 0
+        ? remote.queue.currentIndex.clamp(0, queue.length - 1)
+        : currentIndex;
+    setState(() {
+      _playbackSummary = PlaybackStateSummary(
+        queue: queue,
+        currentIndex: safeIndex,
+        isPlaying: false,
+        positionMs: remote.queue.positionMs,
+        durationMs: remote.queue.durationMs,
+        repeatMode: remote.queue.repeatMode,
+        shuffleEnabled: remote.queue.shuffleEnabled,
+        originalQueue: originalQueue,
+      );
+      _repeatMode = remote.queue.repeatMode;
+      _shuffleEnabled = remote.queue.shuffleEnabled;
+      _lastLocalPlaybackQueueUpdatedAt = remote.updatedAt;
+      _remoteQueueCandidate = null;
+      if (!updateOnly) {
+        _status = t.playing(queue[safeIndex].title);
+      }
+    });
+    _recordRecentQueue(_playbackSummary!);
+  }
+
+  CloudPlaybackState? _currentCloudPlaybackState() {
+    final summary = _playbackSummary;
+    if (summary == null ||
+        summary.queue.isEmpty ||
+        summary.current?.source != VideoSource.drive) {
+      return null;
     }
-    final refreshed = await _refreshDriveAccessTokenSilently(
-      clearCurrentToken: true,
+    final snapshot = _queueSnapshot(summary, driveOnly: true);
+    if (snapshot.queueIds.isEmpty) return null;
+    return CloudPlaybackState(
+      deviceId: _deviceId,
+      deviceName: _deviceName,
+      platform: 'android',
+      updatedAt: snapshot.updatedAt,
+      queue: snapshot,
+      queueItems: summary.queue
+          .where((item) => item.source == VideoSource.drive)
+          .map(_cloudVideoState)
+          .toList(growable: false),
     );
-    token = _accessToken;
-    if (!refreshed || token == null || token.isEmpty) return response;
-    return request(token);
+  }
+
+  Future<void> _maybeCreateDailyBackup() async {
+    final last = _lastCloudBackupAt;
+    if (last != null &&
+        DateTime.now().difference(last) < const Duration(days: 1)) {
+      return;
+    }
+    await _createCloudBackup(automatic: true);
+  }
+
+  Future<void> _createCloudBackup({bool automatic = false}) async {
+    if (_accessToken == null || _accessToken!.isEmpty) {
+      if (!automatic) {
+        final ready = await _ensureDriveReady();
+        if (!ready) return;
+      } else {
+        return;
+      }
+    }
+    final now = DateTime.now().toUtc();
+    final payload = CloudBackupPayload(
+      createdAt: now,
+      deviceId: _deviceId,
+      deviceName: _deviceName,
+      platform: 'android',
+      library: _buildLocalCloudLibraryState(),
+      queue: _currentCloudPlaybackState(),
+    );
+    try {
+      await _driveAppData.upsertJsonFile(
+        name:
+            '$_cloudBackupPrefix${now.millisecondsSinceEpoch}.$_deviceId.json',
+        json: payload.toJson(),
+      );
+      _lastCloudBackupAt = now;
+      final files = await _driveAppData.listFiles(
+        namePrefix: _cloudBackupPrefix,
+      );
+      for (final stale in files.skip(5)) {
+        await _driveAppData.deleteFile(stale.id);
+      }
+      _recordDiagnostic(
+        'backup',
+        automatic ? 'Automatic cloud backup created.' : 'Cloud backup created.',
+      );
+      await _saveLibraryState();
+    } on DriveApiException catch (error) {
+      _setSyncFailure(error);
+      if (!automatic) _showMessage(_driveFailureMessage(error.kind));
+    }
+  }
+
+  Future<List<_CloudBackupEntry>> _loadCloudBackups() async {
+    final files = await _driveAppData.listFiles(namePrefix: _cloudBackupPrefix);
+    final result = <_CloudBackupEntry>[];
+    for (final file in files.take(5)) {
+      try {
+        final json = await _driveAppData.readJsonFile(file.id);
+        if (json == null) continue;
+        result.add(
+          _CloudBackupEntry(
+            file: file,
+            payload: CloudBackupPayload.fromJson(json),
+          ),
+        );
+      } catch (_) {
+        _recordDiagnostic('backup', 'Ignored invalid cloud backup.');
+      }
+    }
+    result.sort((a, b) => b.payload.createdAt.compareTo(a.payload.createdAt));
+    return result;
+  }
+
+  Future<void> _restoreCloudBackup(_CloudBackupEntry entry) async {
+    final now = DateTime.now().toUtc();
+    final source = entry.payload.library;
+    final restored = CloudLibraryState(
+      deviceId: _deviceId,
+      deviceName: _deviceName,
+      platform: 'android',
+      updatedAt: now,
+      videos: source.videos
+          .map(
+            (item) => item.copyWith(
+              updatedAt: now,
+              updatedByDeviceId: _deviceId,
+              deletedAt: item.isDeleted ? now : null,
+              clearDeletedAt: !item.isDeleted,
+            ),
+          )
+          .toList(growable: false),
+      playlists: source.playlists
+          .map(
+            (item) => CloudPlaylistState(
+              id: item.id,
+              name: item.name,
+              driveVideoIds: item.driveVideoIds,
+              createdAt: item.createdAt,
+              updatedAt: now,
+              updatedByDeviceId: _deviceId,
+              sourceLabel: item.sourceLabel,
+              deletedAt: item.isDeleted ? now : null,
+            ),
+          )
+          .toList(growable: false),
+      imports: source.imports
+          .map(
+            (item) => DriveImportRecord(
+              id: item.id,
+              folderId: item.folderId,
+              name: item.name,
+              videoIds: item.videoIds,
+              playlistId: item.playlistId,
+              importedAt: item.importedAt,
+              updatedAt: now,
+              updatedByDeviceId: _deviceId,
+              deletedAt: item.isDeleted ? now : null,
+            ),
+          )
+          .toList(growable: false),
+      recentQueues: source.recentQueues,
+      resumePlayback: CloudSettingValue<bool>(
+        value: source.resumePlayback.value,
+        updatedAt: now,
+        updatedByDeviceId: _deviceId,
+      ),
+    );
+    _applyMergedCloudLibrary(restored);
+    final queue = entry.payload.queue;
+    if (queue != null) {
+      _applyRemoteQueue(
+        CloudPlaybackState(
+          deviceId: _deviceId,
+          deviceName: _deviceName,
+          platform: 'android',
+          updatedAt: now,
+          queue: RecentQueueSnapshot(
+            id: '$_deviceId:${queue.queue.signature}',
+            deviceId: _deviceId,
+            deviceName: _deviceName,
+            title: queue.queue.title,
+            queueIds: queue.queue.queueIds,
+            originalQueueIds: queue.queue.originalQueueIds,
+            currentIndex: queue.queue.currentIndex,
+            currentVideoId: queue.queue.currentVideoId,
+            positionMs: queue.queue.positionMs,
+            durationMs: queue.queue.durationMs,
+            repeatMode: queue.queue.repeatMode,
+            shuffleEnabled: queue.queue.shuffleEnabled,
+            updatedAt: now,
+          ),
+          queueItems: queue.queueItems,
+        ),
+      );
+    }
+    _lastUploadedCloudLibrarySignature = null;
+    _lastUploadedCloudQueueSignature = null;
+    await _saveLibraryState();
+    await _syncAllCloudState();
+    await _syncPlaybackQueueToDrive();
+    _recordDiagnostic('backup', 'Cloud backup restored.');
   }
 
   void _invalidateVisibleVideos() {
@@ -1400,7 +2448,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       final connected = _accessToken != null && _accessToken!.isNotEmpty;
       if (connected && forceCloudQueueSync) {
-        await _syncPlaybackQueueFromDrive(force: true);
+        await _syncAllCloudState(pullOnly: true);
       }
       return connected;
     } catch (error) {
@@ -1472,7 +2520,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _lastGoogleEmail = user.email;
         _accessToken = token;
         _cloudQueueFileId = null;
+        _cloudLibraryFileId = null;
         _lastUploadedCloudQueueSignature = null;
+        _lastUploadedCloudLibrarySignature = null;
         _driveAuthExpired = token == null;
         _status = token == null
             ? t.drivePermissionRequired
@@ -1480,7 +2530,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       });
       await _saveLibraryState();
       if (token != null && token.isNotEmpty) {
-        unawaited(_syncPlaybackQueueFromDrive());
+        unawaited(_syncAllCloudState(pullOnly: true));
       }
       return;
     }
@@ -1501,7 +2551,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _lastGoogleEmail = user.email;
       _accessToken = authorization?.replaceFirst('Bearer ', '');
       _cloudQueueFileId = null;
+      _cloudLibraryFileId = null;
       _lastUploadedCloudQueueSignature = null;
+      _lastUploadedCloudLibrarySignature = null;
       _driveAuthExpired = authorization == null;
       _status = authorization == null
           ? t.drivePermissionRequired
@@ -1509,7 +2561,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
     await _saveLibraryState();
     if (authorization != null && authorization.isNotEmpty) {
-      unawaited(_syncPlaybackQueueFromDrive());
+      unawaited(_syncAllCloudState(pullOnly: true));
     }
   }
 
@@ -1541,7 +2593,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           items: playlistItems,
         );
       }
+      final importedAt = DateTime.now();
+      for (final folder in result.sourceFolders.entries) {
+        final record = DriveImportRecord(
+          id: 'drive-import:${folder.key}',
+          folderId: folder.key,
+          name: folder.value,
+          videoIds: result.items.map((item) => item.id).toList(growable: false),
+          playlistId: createdPlaylist?.id,
+          importedAt: importedAt,
+          updatedAt: importedAt,
+          updatedByDeviceId: _deviceId,
+        );
+        _driveImports.removeWhere((item) => item.id == record.id);
+        _driveImports.insert(0, record);
+      }
       await _saveLibraryState();
+      _scheduleCloudLibrarySync();
       setState(() {
         if (createdPlaylist != null) {
           _selectedTab = LibraryTab.playlist;
@@ -1566,9 +2634,80 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
   }
 
+  Future<void> _reimportDriveFolder(DriveImportRecord record) async {
+    await _guarded(() async {
+      if (!await _ensureDriveReady()) return;
+      final result = await _collectDriveVideosRecursively(
+        record.folderId,
+        record.name,
+        (progress) {
+          if (!mounted) return;
+          setState(() {
+            _status =
+                '${progress.currentFolderName}: ${progress.videosFound} videos';
+          });
+        },
+      );
+      final addedItems = _addUniqueVideos(result.items);
+      final allIds = result.items
+          .map((item) => item.id)
+          .toList(growable: false);
+      var playlistId = record.playlistId;
+      final playlistIndex = playlistId == null
+          ? -1
+          : _playlists.indexWhere((item) => item.id == playlistId);
+      if (playlistIndex >= 0) {
+        final playlist = _playlists[playlistIndex];
+        _playlists[playlistIndex] = playlist.copyWith(
+          videoIds: {...playlist.videoIds, ...allIds}.toList(),
+          updatedAt: DateTime.now(),
+        );
+      } else if (result.items.isNotEmpty) {
+        playlistId = _createPlaylistFromItems(
+          name: record.name,
+          sourceLabel: 'Google Drive',
+          items: _uniqueItemsForPlaylist(result.items),
+        ).id;
+      }
+      final now = DateTime.now();
+      final updatedRecord = DriveImportRecord(
+        id: record.id,
+        folderId: record.folderId,
+        name: record.name,
+        videoIds: allIds,
+        playlistId: playlistId,
+        importedAt: record.importedAt,
+        updatedAt: now,
+        updatedByDeviceId: _deviceId,
+      );
+      final recordIndex = _driveImports.indexWhere(
+        (item) => item.id == record.id,
+      );
+      if (recordIndex >= 0) {
+        _driveImports[recordIndex] = updatedRecord;
+      } else {
+        _driveImports.insert(0, updatedRecord);
+      }
+      setState(() {
+        _status = t.isKo
+            ? '${record.name}: ${addedItems.length}\uAC1C \uC0C8 \uC601\uC0C1 \uCD94\uAC00'
+            : '${record.name}: ${addedItems.length} new videos';
+      });
+      await _saveLibraryState();
+      _scheduleCloudLibrarySync();
+      unawaited(_hydrateDriveThumbnails(addedItems));
+    });
+  }
+
   List<VideoItem> _addUniqueVideos(List<VideoItem> items) {
     final knownIds = _videos.map((item) => item.id).toSet();
     final uniqueItems = items.where((item) => knownIds.add(item.id)).toList();
+    final now = DateTime.now();
+    for (final item in uniqueItems) {
+      if (item.source == VideoSource.drive) {
+        _markCloudVideoChanged(item.id, at: now);
+      }
+    }
     setState(() => _videos.addAll(uniqueItems));
     return uniqueItems;
   }
@@ -1608,6 +2747,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       sourceLabel: sourceLabel,
     );
     setState(() => _playlists.insert(0, playlist));
+    _playlistDeletedAt.remove(playlist.id);
+    _scheduleCloudLibrarySync();
     return playlist;
   }
 
@@ -1677,7 +2818,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
     await _saveLibraryState();
     if (syncCloudQueueOnReconnect) {
-      await _syncPlaybackQueueFromDrive(force: true);
+      await _syncAllCloudState(pullOnly: true);
     }
     return true;
   }
@@ -1784,7 +2925,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<List<DriveEntry>> _listDriveEntries(String parentId) async {
     final query =
         "'$parentId' in parents and trashed=false and "
-        "(mimeType='$_driveFolderMimeType' or mimeType contains 'video/')";
+        "(mimeType='$_driveFolderMimeType' or mimeType contains 'video/' or "
+        "mimeType='application/x-subrip' or mimeType='text/vtt' or "
+        "name contains '.srt' or name contains '.vtt')";
     return _listDriveEntriesByQuery(query);
   }
 
@@ -1835,11 +2978,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         );
 
         for (final result in batchResults) {
+          final subtitles = result.entries
+              .where((entry) => entry.isSubtitle)
+              .toList(growable: false);
           for (final entry in result.entries) {
             if (entry.isFolder) {
               nextLevel.add(entry);
             } else if (entry.isVideo) {
-              videos.add(entry.toVideoItem());
+              final subtitle = _matchingDriveSubtitle(entry, subtitles);
+              videos.add(entry.toVideoItem(subtitle: subtitle));
             }
           }
         }
@@ -1857,6 +3004,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return DriveImportResult(
       items: videos,
       sourceName: sourceName,
+      sourceFolders: {folderId: sourceName},
       foldersScanned: foldersScanned,
       videosFound: videos.length,
       createPlaylist: true,
@@ -1891,12 +3039,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           final videoMetadata =
               file['videoMediaMetadata'] as Map<String, Object?>?;
           final durationMillis = videoMetadata?['durationMillis'];
+          final name = file['name'] as String? ?? "Untitled";
+          final lowerName = name.toLowerCase();
+          final isSubtitle =
+              mimeType == 'application/x-subrip' ||
+              mimeType == 'text/vtt' ||
+              lowerName.endsWith('.srt') ||
+              lowerName.endsWith('.vtt');
           return DriveEntry(
             id: file['id']! as String,
-            name: file['name'] as String? ?? "Untitled",
+            name: name,
             mimeType: mimeType,
             type: mimeType == _driveFolderMimeType
                 ? DriveEntryType.folder
+                : isSubtitle
+                ? DriveEntryType.subtitle
                 : DriveEntryType.video,
             modifiedTime: DateTime.tryParse(
               file['modifiedTime'] as String? ?? '',
@@ -1915,10 +3072,55 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } while (pageToken != null && pageToken.isNotEmpty);
 
     entries.sort((a, b) {
-      if (a.type != b.type) return a.isFolder ? -1 : 1;
+      if (a.type != b.type) return a.type.index.compareTo(b.type.index);
       return a.name.toLowerCase().compareTo(b.name.toLowerCase());
     });
     return entries;
+  }
+
+  SubtitleReference? _matchingDriveSubtitle(
+    DriveEntry video,
+    List<DriveEntry> subtitles,
+  ) {
+    final videoStem = _fileStem(video.name);
+    final candidates = subtitles
+        .where((subtitle) {
+          final subtitleStem = _fileStem(subtitle.name);
+          return subtitleStem == videoStem ||
+              subtitleStem.startsWith('$videoStem.');
+        })
+        .toList(growable: false);
+    if (candidates.isEmpty) return null;
+    candidates.sort((a, b) {
+      final aExact = _fileStem(a.name) == videoStem ? 0 : 1;
+      final bExact = _fileStem(b.name) == videoStem ? 0 : 1;
+      return aExact != bExact
+          ? aExact.compareTo(bExact)
+          : a.name.compareTo(b.name);
+    });
+    final subtitle = candidates.first;
+    return SubtitleReference(
+      kind: 'drive',
+      uri: 'https://www.googleapis.com/drive/v3/files/${subtitle.id}?alt=media',
+      mimeType: subtitle.name.toLowerCase().endsWith('.vtt')
+          ? 'text/vtt'
+          : 'application/x-subrip',
+      fileId: subtitle.id,
+      label: subtitle.name,
+      language: _subtitleLanguageFromName(videoStem, subtitle.name),
+    );
+  }
+
+  String _fileStem(String name) {
+    final dot = name.lastIndexOf('.');
+    return (dot <= 0 ? name : name.substring(0, dot)).toLowerCase();
+  }
+
+  String? _subtitleLanguageFromName(String videoStem, String subtitleName) {
+    final subtitleStem = _fileStem(subtitleName);
+    if (!subtitleStem.startsWith('$videoStem.')) return null;
+    final language = subtitleStem.substring(videoStem.length + 1);
+    return language.isEmpty ? null : language;
   }
 
   Future<Map<String, Object?>> _driveGet(Uri url) async {
@@ -1927,12 +3129,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       response = await http
           .get(url, headers: {'Authorization': 'Bearer $_accessToken'})
           .timeout(const Duration(seconds: 25));
-    } on TimeoutException {
-      throw StateError(
-        'Drive request timed out. Check the network and try again.',
+    } on TimeoutException catch (error) {
+      throw DriveApiException(
+        kind: DriveFailureKind.network,
+        message: _driveFailureMessage(DriveFailureKind.network),
+        reason: error.toString(),
       );
-    } on http.ClientException {
-      throw StateError('Network connection failed. Try Drive again.');
+    } on io.SocketException catch (error) {
+      throw DriveApiException(
+        kind: DriveFailureKind.network,
+        message: _driveFailureMessage(DriveFailureKind.network),
+        reason: error.message,
+      );
+    } on http.ClientException catch (error) {
+      throw DriveApiException(
+        kind: DriveFailureKind.network,
+        message: _driveFailureMessage(DriveFailureKind.network),
+        reason: error.message,
+      );
     }
 
     if (response.statusCode == 401 || response.statusCode == 403) {
@@ -1947,10 +3161,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (retryResponse.statusCode >= 200 && retryResponse.statusCode < 300) {
           return jsonDecode(retryResponse.body) as Map<String, Object?>;
         }
-        if (retryResponse.statusCode == 403 ||
-            retryResponse.statusCode == 404) {
-          throw StateError('Drive file was not found or is not accessible.');
+        if (retryResponse.statusCode == 403) {
+          throw DriveApiException(
+            kind: DriveFailureKind.accessDenied,
+            message: _driveFailureMessage(DriveFailureKind.accessDenied),
+            statusCode: 403,
+          );
         }
+        if (retryResponse.statusCode == 404) {
+          throw DriveApiException(
+            kind: DriveFailureKind.fileMissing,
+            message: _driveFailureMessage(DriveFailureKind.fileMissing),
+            statusCode: 404,
+          );
+        }
+        if (retryResponse.statusCode != 401) {
+          throw _driveHttpException(retryResponse.statusCode);
+        }
+      } else if (response.statusCode == 403) {
+        throw DriveApiException(
+          kind: DriveFailureKind.accessDenied,
+          message: _driveFailureMessage(DriveFailureKind.accessDenied),
+          statusCode: 403,
+        );
       }
       final token = _accessToken;
       if (_user != null && token != null) {
@@ -1966,18 +3199,39 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         });
       }
       await _saveLibraryState();
-      throw StateError(t.drivePermissionExpired);
+      _showDriveReconnectMessageIfNeeded();
+      throw DriveApiException(
+        kind: DriveFailureKind.authRequired,
+        message: _driveFailureMessage(DriveFailureKind.authRequired),
+        statusCode: 401,
+      );
     }
     if (response.statusCode == 404) {
-      throw StateError('Drive file was not found or is not accessible.');
-    }
-    if (response.statusCode == 429) {
-      throw StateError('Too many Drive requests. Try again later.');
+      throw DriveApiException(
+        kind: DriveFailureKind.fileMissing,
+        message: _driveFailureMessage(DriveFailureKind.fileMissing),
+        statusCode: 404,
+      );
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw StateError('Drive request failed (${response.statusCode}).');
+      throw _driveHttpException(response.statusCode);
     }
     return jsonDecode(response.body) as Map<String, Object?>;
+  }
+
+  DriveApiException _driveHttpException(int statusCode) {
+    final kind = switch (statusCode) {
+      403 => DriveFailureKind.accessDenied,
+      404 => DriveFailureKind.fileMissing,
+      429 => DriveFailureKind.rateLimited,
+      >= 500 => DriveFailureKind.server,
+      _ => DriveFailureKind.unknown,
+    };
+    return DriveApiException(
+      kind: kind,
+      message: _driveFailureMessage(kind),
+      statusCode: statusCode,
+    );
   }
 
   Future<void> _hydrateDriveThumbnails(List<VideoItem> items) async {
@@ -2037,7 +3291,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
     final queue = [...items]..shuffle(_random);
-    await _startPlayback(queue, startIndex: 0);
+    await _startPlayback(
+      queue,
+      startIndex: 0,
+      shuffleEnabled: true,
+      originalQueue: items,
+    );
   }
 
   Future<void> _playVisibleInOrder() async {
@@ -2046,7 +3305,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _showMessage(t.noVideosIn(_tabLabel(_selectedTab)));
       return;
     }
-    await _startPlayback(items, startIndex: 0);
+    await _startPlayback(items, startIndex: 0, shuffleEnabled: false);
   }
 
   Future<void> _playFromItem(VideoItem item) async {
@@ -2089,6 +3348,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<bool> _syncCloudQueueBeforeResumeIfNeeded() async {
     final summary = _playbackSummary;
+    final reconnecting = _driveAuthExpired || _accessToken == null;
     final shouldCheckDriveQueue =
         _driveAuthExpired ||
         _lastGoogleEmail != null ||
@@ -2100,7 +3360,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       syncCloudQueueOnReconnect: true,
     );
     if (!ready) return false;
-    await _syncPlaybackQueueFromDrive(force: true);
+    await _syncAllCloudState(pullOnly: true);
+    final candidate = _remoteQueueCandidate;
+    final shouldRestoreCloudQueue =
+        candidate != null &&
+        (reconnecting ||
+            summary == null ||
+            (summary.queue.length <= 1 && candidate.queue.queueIds.length > 1));
+    if (shouldRestoreCloudQueue) {
+      _applyRemoteQueue(candidate);
+      await _saveLibraryState();
+    }
     return true;
   }
 
@@ -2108,6 +3378,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     List<VideoItem> queue, {
     required int startIndex,
     int? startPositionMs,
+    bool? shuffleEnabled,
+    PlayerRepeatMode? repeatMode,
+    List<VideoItem>? originalQueue,
   }) async {
     await _guarded(() async {
       if (queue.isEmpty) {
@@ -2115,34 +3388,58 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         return;
       }
       if (!await _ensurePlaybackReadyFor(queue)) return;
-      final normalizedIndex = startIndex.clamp(0, queue.length - 1);
+      final resolvedShuffle = shuffleEnabled ?? _shuffleEnabled;
+      final resolvedRepeat = repeatMode ?? _repeatMode;
+      final preservedOriginal = List<VideoItem>.from(originalQueue ?? queue);
+      var playbackQueue = List<VideoItem>.from(queue);
+      var normalizedIndex = startIndex.clamp(0, queue.length - 1);
+      if (resolvedShuffle && originalQueue == null && queue.length > 1) {
+        final current = queue[normalizedIndex];
+        final rest = queue.where((item) => item.id != current.id).toList()
+          ..shuffle(_random);
+        playbackQueue = [current, ...rest];
+        normalizedIndex = 0;
+      }
       final count = await _playback.invokeMethod<int>('playQueue', {
         'accessToken': _accessToken,
-        'items': queue.map((item) => item.toPlaybackMap()).toList(),
+        'items': playbackQueue.map((item) => item.toPlaybackMap()).toList(),
+        'originalItems': preservedOriginal
+            .map((item) => item.toPlaybackMap())
+            .toList(),
         'startIndex': normalizedIndex,
         'startPositionMs':
-            startPositionMs ?? _resumeStartPositionFor(queue[normalizedIndex]),
+            startPositionMs ??
+            _resumeStartPositionFor(playbackQueue[normalizedIndex]),
+        'repeatMode': resolvedRepeat.name,
+        'shuffleEnabled': resolvedShuffle,
+        'failurePolicy': _playbackFailurePolicy.name,
+        'resizeMode': _resizeMode,
       });
-      final current = queue[normalizedIndex];
+      final current = playbackQueue[normalizedIndex];
       _markPlayed(current);
       setState(() {
         _playbackSummary = PlaybackStateSummary(
-          queue: queue,
+          queue: playbackQueue,
           currentIndex: normalizedIndex,
           isPlaying: true,
           positionMs: current.lastPositionMs,
           durationMs: current.duration ?? 0,
+          repeatMode: resolvedRepeat,
+          shuffleEnabled: resolvedShuffle,
+          originalQueue: preservedOriginal,
         );
+        _repeatMode = resolvedRepeat;
+        _shuffleEnabled = resolvedShuffle;
         _status = t.playing(current.title);
       });
       _rememberPersistedPlaybackSnapshot(
         current.id,
         current.lastPositionMs,
-        queueIds: queue.map((item) => item.id).toList(growable: false),
+        queueIds: playbackQueue.map((item) => item.id).toList(growable: false),
       );
       await _saveLibraryState();
       unawaited(_syncPlaybackQueueToDrive());
-      if ((count ?? queue.length) > 0) {
+      if ((count ?? playbackQueue.length) > 0) {
         await _playback.invokeMethod('openPlayer');
       }
     });
@@ -2162,6 +3459,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final index = _videos.indexWhere((candidate) => candidate.id == item.id);
     if (index >= 0) {
       _videos[index] = _videos[index].copyWith(lastPlayedAt: playedAt);
+      if (_videos[index].source == VideoSource.drive) {
+        _markCloudVideoChanged(item.id, at: playedAt);
+      }
       _invalidateVisibleVideos();
     }
     _recentIds
@@ -2191,8 +3491,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await _playback.invokeMethod<int>('playQueue', {
       'accessToken': _accessToken,
       'items': summary.queue.map((item) => item.toPlaybackMap()).toList(),
+      'originalItems':
+          (summary.originalQueue.isEmpty
+                  ? summary.queue
+                  : summary.originalQueue)
+              .map((item) => item.toPlaybackMap())
+              .toList(),
       'startIndex': currentIndex,
       'startPositionMs': _resumePlayback ? summary.positionMs : 0,
+      'repeatMode': summary.repeatMode.name,
+      'shuffleEnabled': summary.shuffleEnabled,
+      'failurePolicy': _playbackFailurePolicy.name,
+      'resizeMode': _resizeMode,
     });
     final current = summary.queue[currentIndex];
     _markPlayed(current);
@@ -2203,6 +3513,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         isPlaying: true,
         positionMs: _resumePlayback ? summary.positionMs : 0,
         durationMs: summary.durationMs,
+        repeatMode: summary.repeatMode,
+        shuffleEnabled: summary.shuffleEnabled,
+        originalQueue: summary.originalQueue,
       );
       _status = t.playing(current.title);
     });
@@ -2242,6 +3555,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           isPlaying: !summary.isPlaying,
           positionMs: summary.positionMs,
           durationMs: summary.durationMs,
+          repeatMode: summary.repeatMode,
+          shuffleEnabled: summary.shuffleEnabled,
+          originalQueue: summary.originalQueue,
         );
       });
     });
@@ -2272,6 +3588,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           queue: summary.queue,
           currentIndex: nextIndex,
           isPlaying: summary.isPlaying,
+          positionMs: 0,
+          durationMs: summary.queue[nextIndex].duration ?? 0,
+          repeatMode: summary.repeatMode,
+          shuffleEnabled: summary.shuffleEnabled,
+          originalQueue: summary.originalQueue,
         );
       });
       _rememberPlaybackQueueChanged();
@@ -2296,61 +3617,116 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _showCurrentQueue() async {
     await _syncPlaybackState();
-    final summary = _playbackSummary;
+    if (_accessToken != null && _accessToken!.isNotEmpty) {
+      await _syncPlaybackQueueFromDrive();
+    }
     if (!mounted) return;
-    if (summary == null || summary.queue.isEmpty) {
-      _showMessage(t.queueEmpty);
+    final videoById = {for (final item in _videos) item.id: item};
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (context) => _QueueHubPage(
+          strings: t,
+          current: _playbackSummary,
+          recentQueues: List<RecentQueueSnapshot>.unmodifiable(
+            [..._recentQueues]
+              ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt)),
+          ),
+          deviceQueues: List<CloudPlaybackState>.unmodifiable(
+            [..._knownDeviceQueues]
+              ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt)),
+          ),
+          videoById: videoById,
+          ownDeviceId: _deviceId,
+          onPlayCurrent: (index) async {
+            final summary = _playbackSummary;
+            if (summary == null || summary.queue.isEmpty) return;
+            await _startPlayback(
+              summary.queue,
+              startIndex: index,
+              repeatMode: summary.repeatMode,
+              shuffleEnabled: summary.shuffleEnabled,
+              originalQueue: summary.originalQueue,
+            );
+          },
+          onRestoreRecent: (snapshot) =>
+              _restoreRecentQueue(snapshot, startPlayback: false),
+          onImportDeviceQueue: (state) =>
+              _importDeviceQueue(state, startPlayback: false),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _restoreRecentQueue(
+    RecentQueueSnapshot snapshot, {
+    required bool startPlayback,
+  }) async {
+    final byId = {for (final item in _videos) item.id: item};
+    final queue = snapshot.queueIds
+        .map((id) => byId[id])
+        .whereType<VideoItem>()
+        .toList(growable: false);
+    if (queue.isEmpty) {
+      _showMessage(t.noVideosToPlay);
       return;
     }
-    await showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      builder: (context) {
-        return SafeArea(
-          child: ListView.separated(
-            shrinkWrap: true,
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-            itemCount: summary.queue.length + 1,
-            separatorBuilder: (context, index) => const Divider(height: 1),
-            itemBuilder: (context, index) {
-              if (index == 0) {
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: Text(
-                    '${t.currentQueue} · ${summary.queue.length}',
-                    style: TextStyle(
-                      color: _Ui.text,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                );
-              }
-              final itemIndex = index - 1;
-              final item = summary.queue[itemIndex];
-              final current = itemIndex == summary.currentIndex;
-              return ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(
-                  current ? Icons.play_arrow : Icons.video_file_outlined,
-                  color: current ? _Ui.accent : _Ui.text3,
-                ),
-                title: Text(
-                  item.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                subtitle: Text(current ? t.nowPlaying : t.tapToPlay),
-                onTap: () async {
-                  Navigator.pop(context);
-                  await _startPlayback(summary.queue, startIndex: itemIndex);
-                },
-              );
-            },
-          ),
-        );
-      },
-    );
+    final originalQueue = snapshot.originalQueueIds
+        .map((id) => byId[id])
+        .whereType<VideoItem>()
+        .toList(growable: false);
+    final currentIndexById = snapshot.currentVideoId == null
+        ? -1
+        : queue.indexWhere((item) => item.id == snapshot.currentVideoId);
+    final currentIndex = currentIndexById >= 0
+        ? currentIndexById
+        : snapshot.currentIndex.clamp(0, queue.length - 1);
+    setState(() {
+      _playbackSummary = PlaybackStateSummary(
+        queue: queue,
+        currentIndex: currentIndex,
+        isPlaying: false,
+        positionMs: snapshot.positionMs,
+        durationMs: snapshot.durationMs,
+        repeatMode: snapshot.repeatMode,
+        shuffleEnabled: snapshot.shuffleEnabled,
+        originalQueue: originalQueue,
+      );
+      _repeatMode = snapshot.repeatMode;
+      _shuffleEnabled = snapshot.shuffleEnabled;
+      _lastLocalPlaybackQueueUpdatedAt = DateTime.now();
+      _status = t.playing(queue[currentIndex].title);
+    });
+    _rememberPlaybackQueueChanged();
+    await _saveLibraryState();
+    if (startPlayback) {
+      await _startPlayback(
+        queue,
+        startIndex: currentIndex,
+        startPositionMs: snapshot.positionMs,
+        repeatMode: snapshot.repeatMode,
+        shuffleEnabled: snapshot.shuffleEnabled,
+        originalQueue: originalQueue,
+      );
+    }
+  }
+
+  Future<void> _importDeviceQueue(
+    CloudPlaybackState state, {
+    required bool startPlayback,
+  }) async {
+    _applyRemoteQueue(state);
+    await _saveLibraryState();
+    final summary = _playbackSummary;
+    if (startPlayback && summary != null && summary.queue.isNotEmpty) {
+      await _startPlayback(
+        summary.queue,
+        startIndex: summary.currentIndex,
+        startPositionMs: summary.positionMs,
+        repeatMode: summary.repeatMode,
+        shuffleEnabled: summary.shuffleEnabled,
+        originalQueue: summary.originalQueue,
+      );
+    }
   }
 
   void _toggleFavorite(VideoItem item) {
@@ -2359,7 +3735,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     setState(() {
       _videos[index] = _videos[index].copyWith(isFavorite: !item.isFavorite);
     });
+    if (item.source == VideoSource.drive) _markCloudVideoChanged(item.id);
     unawaited(_saveLibraryState());
+    _scheduleCloudLibrarySync();
   }
 
   void _toggleSelection(VideoItem item) {
@@ -2388,12 +3766,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       for (var index = 0; index < _videos.length; index++) {
         if (_selectedIds.contains(_videos[index].id)) {
           _videos[index] = _videos[index].copyWith(isFavorite: true);
+          if (_videos[index].source == VideoSource.drive) {
+            _markCloudVideoChanged(_videos[index].id);
+          }
         }
       }
       _status = t.favoriteMarked(_selectedIds.length);
       _selectedIds.clear();
     });
     unawaited(_saveLibraryState());
+    _scheduleCloudLibrarySync();
   }
 
   void _removeSelected() {
@@ -2418,10 +3800,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _status = t.removeFromPlaylist;
       });
       unawaited(_saveLibraryState());
+      _scheduleCloudLibrarySync();
       return;
     }
     final count = _selectedIds.length;
     final removingIds = _selectedIds.toSet();
+    for (final item in _videos.where(
+      (item) =>
+          removingIds.contains(item.id) && item.source == VideoSource.drive,
+    )) {
+      _markCloudVideoDeleted(item.id);
+    }
     setState(() {
       _videos.removeWhere((item) => removingIds.contains(item.id));
       _recentIds.removeWhere(removingIds.contains);
@@ -2442,15 +3831,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 isPlaying: summary.isPlaying,
                 positionMs: summary.positionMs,
                 durationMs: summary.durationMs,
+                repeatMode: summary.repeatMode,
+                shuffleEnabled: summary.shuffleEnabled,
+                originalQueue: summary.originalQueue
+                    .where((item) => !removingIds.contains(item.id))
+                    .toList(growable: false),
               );
       }
       _selectedIds.clear();
       _status = t.videosRemoved(count);
     });
     unawaited(_saveLibraryState());
+    _scheduleCloudLibrarySync();
   }
 
   void _removeVideo(VideoItem item) {
+    if (item.source == VideoSource.drive) _markCloudVideoDeleted(item.id);
     setState(() {
       _videos.removeWhere((candidate) => candidate.id == item.id);
       _recentIds.remove(item.id);
@@ -2469,11 +3865,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   nextQueue.length - 1,
                 ),
                 isPlaying: summary.isPlaying,
+                positionMs: summary.positionMs,
+                durationMs: summary.durationMs,
+                repeatMode: summary.repeatMode,
+                shuffleEnabled: summary.shuffleEnabled,
+                originalQueue: summary.originalQueue
+                    .where((candidate) => candidate.id != item.id)
+                    .toList(growable: false),
               );
       }
       _status = "${item.title} removed";
     });
     unawaited(_saveLibraryState());
+    _scheduleCloudLibrarySync();
   }
 
   void _removeFromSelectedPlaylist(VideoItem item) {
@@ -2491,6 +3895,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _status = t.removeFromPlaylist;
     });
     unawaited(_saveLibraryState());
+    _scheduleCloudLibrarySync();
   }
 
   Future<void> _createEmptyPlaylist() async {
@@ -2507,6 +3912,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _status = t.playlistCreated(playlist.name);
     });
     await _saveLibraryState();
+    _scheduleCloudLibrarySync();
   }
 
   Future<void> _renamePlaylist(VideoPlaylist playlist) async {
@@ -2522,9 +3928,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
     });
     await _saveLibraryState();
+    _scheduleCloudLibrarySync();
   }
 
   void _deletePlaylist(VideoPlaylist playlist) {
+    _playlistDeletedAt[playlist.id] = DateTime.now();
     setState(() {
       _playlists.removeWhere((entry) => entry.id == playlist.id);
       if (_selectedPlaylistId == playlist.id) {
@@ -2532,6 +3940,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
     });
     unawaited(_saveLibraryState());
+    _scheduleCloudLibrarySync();
   }
 
   Future<String?> _askPlaylistName({required String initialName}) async {
@@ -2629,6 +4038,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _status = t.addedToPlaylist(selectedItems.length, playlist.name);
     });
     await _saveLibraryState();
+    _scheduleCloudLibrarySync();
   }
 
   void _removeVideoIdsFromPlaylists(Set<String> ids) {
@@ -2646,7 +4056,31 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  void _clearPlaylist() {
+  Future<void> _clearPlaylist() async {
+    await _createCloudBackup(automatic: true);
+    final now = DateTime.now();
+    for (final item in _videos.where(
+      (item) => item.source == VideoSource.drive,
+    )) {
+      _markCloudVideoDeleted(item.id, at: now);
+    }
+    for (final playlist in _playlists) {
+      _playlistDeletedAt[playlist.id] = now;
+    }
+    for (var index = 0; index < _driveImports.length; index++) {
+      final item = _driveImports[index];
+      _driveImports[index] = DriveImportRecord(
+        id: item.id,
+        folderId: item.folderId,
+        name: item.name,
+        videoIds: item.videoIds,
+        playlistId: item.playlistId,
+        importedAt: item.importedAt,
+        updatedAt: now,
+        updatedByDeviceId: _deviceId,
+        deletedAt: now,
+      );
+    }
     setState(() {
       _videos.clear();
       _playlists.clear();
@@ -2656,13 +4090,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _selectedPlaylistId = null;
       _status = t.playlistCleared;
     });
-    unawaited(_saveLibraryState());
+    await _saveLibraryState();
+    _scheduleCloudLibrarySync();
   }
 
-  void _clearResumePositions() {
+  Future<void> _clearResumePositions() async {
+    await _createCloudBackup(automatic: true);
+    final changedAt = DateTime.now();
     setState(() {
       for (var index = 0; index < _videos.length; index++) {
         _videos[index] = _videos[index].copyWith(lastPositionMs: 0);
+        if (_videos[index].source == VideoSource.drive) {
+          _markCloudVideoChanged(_videos[index].id, at: changedAt);
+        }
       }
       final summary = _playbackSummary;
       if (summary != null) {
@@ -2672,11 +4112,226 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           isPlaying: summary.isPlaying,
           positionMs: 0,
           durationMs: summary.durationMs,
+          repeatMode: summary.repeatMode,
+          shuffleEnabled: summary.shuffleEnabled,
+          originalQueue: summary.originalQueue,
         );
       }
       _status = t.resumePositionsCleared;
     });
-    unawaited(_saveLibraryState());
+    await _saveLibraryState();
+    _scheduleCloudLibrarySync();
+  }
+
+  String _syncStatusText() {
+    final last = _syncHealth.lastSuccessAt;
+    return switch (_syncHealth.phase) {
+      SyncPhase.syncing => t.isKo ? '\uB3D9\uAE30\uD654 \uC911' : 'Syncing',
+      SyncPhase.offline => t.isKo ? '\uC624\uD504\uB77C\uC778' : 'Offline',
+      SyncPhase.reconnectRequired => t.reconnectDrivePrompt,
+      SyncPhase.failed =>
+        _syncHealth.message ??
+            (t.isKo ? '\uB3D9\uAE30\uD654 \uC2E4\uD328' : 'Sync failed'),
+      _ when last != null =>
+        t.isKo
+            ? '\uB9C8\uC9C0\uB9C9 \uB3D9\uAE30\uD654: ${_relativeTime(last, true)}'
+            : 'Last sync: ${_relativeTime(last, false)}',
+      _ =>
+        t.isKo
+            ? '\uC544\uC9C1 \uB3D9\uAE30\uD654\uD558\uC9C0 \uC54A\uC74C'
+            : 'Not synced yet',
+    };
+  }
+
+  String _relativeTime(DateTime value, bool isKo) {
+    final difference = DateTime.now().difference(value);
+    if (difference.inMinutes < 1) return isKo ? '\uBC29\uAE08' : 'just now';
+    if (difference.inHours < 1) {
+      return isKo
+          ? '${difference.inMinutes}\uBD84 \uC804'
+          : '${difference.inMinutes} min ago';
+    }
+    if (difference.inDays < 1) {
+      return isKo
+          ? '${difference.inHours}\uC2DC\uAC04 \uC804'
+          : '${difference.inHours} hr ago';
+    }
+    return isKo
+        ? '${difference.inDays}\uC77C \uC804'
+        : '${difference.inDays} days ago';
+  }
+
+  _SyncPageSnapshot _syncPageSnapshot() => _SyncPageSnapshot(
+    health: _syncHealth,
+    account: _user?.email ?? _lastGoogleEmail,
+    deviceId: _deviceId,
+    deviceName: _deviceName,
+    currentQueue: _playbackSummary,
+    remoteCandidate: _remoteQueueCandidate,
+    deviceQueues: List<CloudPlaybackState>.unmodifiable(_knownDeviceQueues),
+    lastBackupAt: _lastCloudBackupAt,
+  );
+
+  Future<void> _openSyncAndBackup() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (context) => _SyncAndBackupPage(
+          strings: t,
+          snapshot: _syncPageSnapshot,
+          onSync: () async {
+            if (!await _ensureDriveReady()) return;
+            await _syncAllCloudState(pullOnly: true);
+          },
+          onBackup: () => _createCloudBackup(),
+          loadBackups: _loadCloudBackups,
+          onRestore: _restoreCloudBackup,
+          onImportRemote: (state) =>
+              _importDeviceQueue(state, startPlayback: false),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openGestureHelp() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (context) => Scaffold(
+          appBar: AppBar(
+            title: Text(
+              t.isKo
+                  ? '\uD50C\uB808\uC774\uC5B4 \uC81C\uC2A4\uCC98'
+                  : 'Player gestures',
+            ),
+          ),
+          body: SafeArea(
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+              children: [
+                _gestureHelpTile(
+                  Icons.touch_app_outlined,
+                  t.isKo ? '\uD55C \uBC88 \uD130\uCE58' : 'Single tap',
+                  t.isKo
+                      ? '\uD50C\uB808\uC774\uC5B4 \uCEE8\uD2B8\uB864\uC744 \uD45C\uC2DC\uD558\uAC70\uB098 \uC228\uAE41\uB2C8\uB2E4.'
+                      : 'Show or hide player controls.',
+                ),
+                _gestureHelpTile(
+                  Icons.fast_forward,
+                  t.isKo ? '\uB354\uBE14 \uD0ED' : 'Double tap',
+                  t.isKo
+                      ? '\uC67C\uCABD/\uC624\uB978\uCABD\uC744 \uC5F0\uC18D \uB354\uBE14 \uD0ED\uD574 10\uCD08\uC529 \uB204\uC801 \uD0D0\uC0C9\uD569\uB2C8\uB2E4.'
+                      : 'Repeatedly double tap left or right to seek in 10-second steps.',
+                ),
+                _gestureHelpTile(
+                  Icons.swipe,
+                  t.isKo
+                      ? '\uAC00\uB85C \uB4DC\uB798\uADF8'
+                      : 'Horizontal drag',
+                  t.isKo
+                      ? '\uD654\uBA74 \uAC00\uC6B4\uB370 4/6 \uC601\uC5ED\uC5D0\uC11C \uC7AC\uC0DD \uC704\uCE58\uB97C \uC62E\uAE41\uB2C8\uB2E4.'
+                      : 'Seek from the middle four-sixths of the video surface.',
+                ),
+                _gestureHelpTile(
+                  Icons.lock_outline,
+                  t.isKo ? '\uC7A0\uAE08' : 'Lock',
+                  t.isKo
+                      ? '\uC7A0\uAE08 \uBC84\uD2BC\uC744 \uAE38\uAC8C \uB20C\uB7EC \uD574\uC81C\uD569\uB2C8\uB2E4.'
+                      : 'Press and hold the lock button to unlock.',
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _gestureHelpTile(IconData icon, String title, String subtitle) {
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(icon, color: _Ui.accent),
+      title: Text(title),
+      subtitle: Text(subtitle),
+    );
+  }
+
+  Future<void> _openDiagnostics() async {
+    Map<String, Object?> nativeState = const {};
+    try {
+      nativeState =
+          await _playback.invokeMapMethod<String, Object?>(
+            'getPlaybackState',
+          ) ??
+          const {};
+    } catch (_) {
+      // A stopped native service is a valid diagnostic state.
+    }
+    if (!mounted) return;
+    final rows = <String, String>{
+      t.isKo ? '\uC571 \uBC84\uC804' : 'App version': _appVersion,
+      'Android': _androidVersion,
+      t.isKo ? '\uD604\uC7AC \uACC4\uC815' : 'Account':
+          _user?.email ??
+          _lastGoogleEmail ??
+          (t.isKo ? '\uC5F0\uACB0 \uC548 \uB428' : 'Not connected'),
+      t.isKo ? 'Drive \uD1A0\uD070' : 'Drive token': _refreshingDriveToken
+          ? (t.isKo ? '\uAC31\uC2E0 \uC911' : 'Refreshing')
+          : _driveAuthExpired || _accessToken == null
+          ? (t.isKo ? '\uC7AC\uC5F0\uACB0 \uD544\uC694' : 'Reconnect required')
+          : (t.isKo ? '\uC0AC\uC6A9 \uAC00\uB2A5' : 'Available'),
+      t.isKo ? '\uD604\uC7AC \uD050' : 'Current queue':
+          '${_playbackSummary?.queue.length ?? 0}',
+      t.isKo ? '\uCD5C\uADFC \uD050' : 'Recent queues':
+          '${_recentQueues.length}',
+      t.isKo ? '\uC378\uB124\uC77C \uCE90\uC2DC' : 'Thumbnail cache':
+          '${_ThumbnailMemoryCache.entryCount} / ${(_ThumbnailMemoryCache.byteCount / (1024 * 1024)).toStringAsFixed(1)} MiB',
+      t.isKo ? '\uB9C8\uC9C0\uB9C9 HTTP' : 'Last HTTP':
+          '${nativeState['httpStatusCode'] ?? '-'}',
+      t.isKo ? '\uC7AC\uC0DD \uC624\uB958' : 'Playback error':
+          '${nativeState['playerErrorCode'] ?? '-'}',
+      t.isKo ? '\uB3D9\uAE30\uD654 \uC624\uB958' : 'Sync error':
+          _syncHealth.message ?? '-',
+    };
+    final logText = _diagnosticLogText(rows);
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (context) => _DiagnosticsPage(
+          strings: t,
+          rows: rows,
+          events: List<DiagnosticEvent>.unmodifiable(_diagnosticEvents),
+          onCopy: () async {
+            await Clipboard.setData(ClipboardData(text: logText));
+          },
+        ),
+      ),
+    );
+  }
+
+  String _diagnosticLogText(Map<String, String> rows) {
+    final buffer = StringBuffer('Cloud Player diagnostics\n');
+    for (final entry in rows.entries) {
+      final value =
+          entry.key.toLowerCase().contains('account') ||
+              entry.key.contains('\uACC4\uC815')
+          ? _maskedAccount(entry.value)
+          : entry.value;
+      buffer.writeln('${entry.key}: $value');
+    }
+    buffer.writeln('Events:');
+    for (final event in _diagnosticEvents) {
+      buffer.writeln(
+        '${event.timestamp.toUtc().toIso8601String()} '
+        '[${event.category}] ${event.failureKind?.name ?? '-'} '
+        '${event.httpStatus ?? '-'} ${event.message}',
+      );
+    }
+    return buffer.toString();
+  }
+
+  String _maskedAccount(String value) {
+    final at = value.indexOf('@');
+    if (at <= 0) return value;
+    final prefix = value.substring(0, at);
+    return '${prefix.substring(0, min(2, prefix.length))}***${value.substring(at)}';
   }
 
   Future<void> _openSettings() async {
@@ -2805,9 +4460,104 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         subtitle: Text(t.resumePlaybackDescription),
                         value: _resumePlayback,
                         onChanged: (value) {
-                          setState(() => _resumePlayback = value);
+                          setState(() {
+                            _resumePlayback = value;
+                            _resumePlaybackUpdatedAt = DateTime.now();
+                          });
                           setPageState(() {});
                           unawaited(_saveLibraryState());
+                          _scheduleCloudLibrarySync();
+                        },
+                      ),
+                      const SizedBox(height: 8),
+                      DropdownButtonFormField<PlaybackFailurePolicy>(
+                        initialValue: _playbackFailurePolicy,
+                        decoration: InputDecoration(
+                          labelText: t.isKo
+                              ? '\uC7AC\uC0DD \uC624\uB958 \uCC98\uB9AC'
+                              : 'Playback error handling',
+                        ),
+                        items: [
+                          DropdownMenuItem(
+                            value: PlaybackFailurePolicy.ask,
+                            child: Text(t.isKo ? '\uBB3B\uAE30' : 'Ask'),
+                          ),
+                          DropdownMenuItem(
+                            value: PlaybackFailurePolicy.skip,
+                            child: Text(
+                              t.isKo
+                                  ? '\uB2E4\uC74C \uC601\uC0C1'
+                                  : 'Play next',
+                            ),
+                          ),
+                          DropdownMenuItem(
+                            value: PlaybackFailurePolicy.stop,
+                            child: Text(t.isKo ? '\uBA48\uCDA4' : 'Stop'),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setState(() => _playbackFailurePolicy = value);
+                          setPageState(() {});
+                          unawaited(_saveLibraryState());
+                          unawaited(
+                            _playback.invokeMethod('updatePlayerPreferences', {
+                              'failurePolicy': value.name,
+                            }),
+                          );
+                        },
+                      ),
+                      const Divider(),
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.cloud_sync_outlined),
+                        title: Text(
+                          t.isKo
+                              ? '\uB3D9\uAE30\uD654 \uBC0F \uBC31\uC5C5'
+                              : 'Sync and backup',
+                        ),
+                        subtitle: Text(_syncStatusText()),
+                        onTap: _openSyncAndBackup,
+                      ),
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.gesture),
+                        title: Text(
+                          t.isKo
+                              ? '\uD50C\uB808\uC774\uC5B4 \uC81C\uC2A4\uCC98'
+                              : 'Player gestures',
+                        ),
+                        onTap: _openGestureHelp,
+                      ),
+                      if (_diagnosticsUnlocked)
+                        ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: const Icon(Icons.monitor_heart_outlined),
+                          title: Text(
+                            t.isKo
+                                ? '\uC9C4\uB2E8 \uB3C4\uAD6C'
+                                : 'Diagnostics',
+                          ),
+                          onTap: _openDiagnostics,
+                        ),
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.info_outline),
+                        title: Text(
+                          t.isKo ? '\uC571 \uBC84\uC804' : 'App version',
+                        ),
+                        subtitle: Text(_appVersion),
+                        onTap: () {
+                          _versionTapCount += 1;
+                          if (_versionTapCount >= 7 && !_diagnosticsUnlocked) {
+                            setState(() => _diagnosticsUnlocked = true);
+                            setPageState(() {});
+                            _showMessage(
+                              t.isKo
+                                  ? '\uC9C4\uB2E8 \uB3C4\uAD6C\uB97C \uD65C\uC131\uD654\uD588\uC2B5\uB2C8\uB2E4.'
+                                  : 'Diagnostics enabled.',
+                            );
+                          }
                         },
                       ),
                       const Divider(),
@@ -2881,6 +4631,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     _driveAuthExpired
                         ? t.reconnectDrivePrompt
                         : email ?? _lastGoogleEmail ?? t.driveSignInRequired,
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(left: 56, bottom: 8),
+                  child: Text(
+                    _syncStatusText(),
+                    style: TextStyle(color: _Ui.text2, fontSize: 11),
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -3288,6 +5045,31 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                       ),
                                 ),
                               ),
+                              if (_remoteQueueCandidate != null)
+                                SliverToBoxAdapter(
+                                  child: _RemoteQueueBanner(
+                                    state: _remoteQueueCandidate!,
+                                    strings: t,
+                                    onImport: () => _importDeviceQueue(
+                                      _remoteQueueCandidate!,
+                                      startPlayback: false,
+                                    ),
+                                    onDismiss: () => setState(
+                                      () => _remoteQueueCandidate = null,
+                                    ),
+                                  ),
+                                ),
+                              if (_selectedTab == LibraryTab.drive &&
+                                  _driveImports.any((item) => !item.isDeleted))
+                                SliverToBoxAdapter(
+                                  child: _DriveImportHistoryBand(
+                                    records: _driveImports
+                                        .where((item) => !item.isDeleted)
+                                        .toList(growable: false),
+                                    strings: t,
+                                    onReimport: _reimportDriveFolder,
+                                  ),
+                                ),
                               if (_selectedTab == LibraryTab.playlist &&
                                   selectedPlaylist == null)
                                 _PlaylistSliverList(
@@ -4641,25 +6423,43 @@ class _VideoGridTile extends StatelessWidget {
 
 class _ThumbnailMemoryCache {
   static const _maxEntries = 80;
-  static final _images = <String, MemoryImage>{};
+  static const _maxBytes = 32 * 1024 * 1024;
+  static final _images = <String, _ThumbnailCacheEntry>{};
+  static int _byteCount = 0;
+
+  static int get entryCount => _images.length;
+  static int get byteCount => _byteCount;
 
   static MemoryImage? imageFor(String encoded) {
     final existing = _images.remove(encoded);
     if (existing != null) {
       _images[encoded] = existing;
-      return existing;
+      return existing.image;
     }
     try {
-      final image = MemoryImage(base64Decode(encoded));
-      _images[encoded] = image;
-      if (_images.length > _maxEntries) {
-        _images.remove(_images.keys.first);
+      final bytes = base64Decode(encoded);
+      final entry = _ThumbnailCacheEntry(
+        image: MemoryImage(bytes),
+        byteCount: bytes.length,
+      );
+      _images[encoded] = entry;
+      _byteCount += entry.byteCount;
+      while (_images.length > _maxEntries || _byteCount > _maxBytes) {
+        final removed = _images.remove(_images.keys.first);
+        if (removed != null) _byteCount -= removed.byteCount;
       }
-      return image;
+      return entry.image;
     } on FormatException {
       return null;
     }
   }
+}
+
+class _ThumbnailCacheEntry {
+  const _ThumbnailCacheEntry({required this.image, required this.byteCount});
+
+  final MemoryImage image;
+  final int byteCount;
 }
 
 class _VideoThumb extends StatelessWidget {
@@ -4765,6 +6565,873 @@ class _EmptyTab extends StatelessWidget {
       ),
     );
   }
+}
+
+class _DriveImportHistoryBand extends StatelessWidget {
+  const _DriveImportHistoryBand({
+    required this.records,
+    required this.strings,
+    required this.onReimport,
+  });
+
+  final List<DriveImportRecord> records;
+  final AppStrings strings;
+  final Future<void> Function(DriveImportRecord record) onReimport;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            strings.isKo
+                ? '\uAC00\uC838\uC628 Drive \uD3F4\uB354'
+                : 'Imported Drive folders',
+            style: TextStyle(
+              color: _Ui.text,
+              fontSize: 13,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 5),
+          for (final record in records.take(5))
+            ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.folder_outlined, color: _Ui.accent),
+              title: Text(
+                record.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              subtitle: Text(
+                '${strings.videoCount(record.videoIds.length)} · ${_shortDateTime(record.updatedAt)}',
+              ),
+              trailing: IconButton(
+                tooltip: strings.isKo
+                    ? '\uB2E4\uC2DC \uAC00\uC838\uC624\uAE30'
+                    : 'Reimport',
+                onPressed: () => onReimport(record),
+                icon: const Icon(Icons.refresh),
+              ),
+            ),
+          const Divider(height: 1),
+        ],
+      ),
+    );
+  }
+}
+
+class _SyncPageSnapshot {
+  const _SyncPageSnapshot({
+    required this.health,
+    required this.account,
+    required this.deviceId,
+    required this.deviceName,
+    required this.currentQueue,
+    required this.remoteCandidate,
+    required this.deviceQueues,
+    required this.lastBackupAt,
+  });
+
+  final SyncHealth health;
+  final String? account;
+  final String deviceId;
+  final String deviceName;
+  final PlaybackStateSummary? currentQueue;
+  final CloudPlaybackState? remoteCandidate;
+  final List<CloudPlaybackState> deviceQueues;
+  final DateTime? lastBackupAt;
+}
+
+class _SyncAndBackupPage extends StatefulWidget {
+  const _SyncAndBackupPage({
+    required this.strings,
+    required this.snapshot,
+    required this.onSync,
+    required this.onBackup,
+    required this.loadBackups,
+    required this.onRestore,
+    required this.onImportRemote,
+  });
+
+  final AppStrings strings;
+  final _SyncPageSnapshot Function() snapshot;
+  final Future<void> Function() onSync;
+  final Future<void> Function() onBackup;
+  final Future<List<_CloudBackupEntry>> Function() loadBackups;
+  final Future<void> Function(_CloudBackupEntry entry) onRestore;
+  final Future<void> Function(CloudPlaybackState state) onImportRemote;
+
+  @override
+  State<_SyncAndBackupPage> createState() => _SyncAndBackupPageState();
+}
+
+class _SyncAndBackupPageState extends State<_SyncAndBackupPage> {
+  bool _busy = false;
+  List<_CloudBackupEntry> _backups = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_refreshBackups());
+  }
+
+  Future<void> _run(Future<void> Function() action) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await action();
+      await _refreshBackups(updateBusy: false);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _refreshBackups({bool updateBusy = true}) async {
+    try {
+      final backups = await widget.loadBackups();
+      if (mounted) setState(() => _backups = backups);
+    } catch (_) {
+      // The status section reports the Drive error from the parent state.
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final strings = widget.strings;
+    final isKo = strings.isKo;
+    final state = widget.snapshot();
+    final lastSync = state.health.lastSuccessAt;
+    final otherDevices = <String, CloudPlaybackState>{};
+    for (final queue in state.deviceQueues) {
+      if (queue.deviceId == state.deviceId) continue;
+      final existing = otherDevices[queue.deviceId];
+      if (existing == null || queue.updatedAt.isAfter(existing.updatedAt)) {
+        otherDevices[queue.deviceId] = queue;
+      }
+    }
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(
+          isKo ? '\uB3D9\uAE30\uD654 \uBC0F \uBC31\uC5C5' : 'Sync and backup',
+        ),
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(18, 12, 18, 28),
+          children: [
+            _SettingsSectionTitle(
+              title: isKo ? '\uB3D9\uAE30\uD654 \uC0C1\uD0DC' : 'Sync status',
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                _syncIcon(state.health.phase),
+                color: _syncColor(state.health.phase),
+              ),
+              title: Text(_syncLabel(state.health.phase, isKo)),
+              subtitle: Text(
+                lastSync == null
+                    ? (isKo
+                          ? '\uC544\uC9C1 \uB3D9\uAE30\uD654\uD558\uC9C0 \uC54A\uC74C'
+                          : 'Not synced yet')
+                    : '${isKo ? '\uB9C8\uC9C0\uB9C9 \uB3D9\uAE30\uD654' : 'Last sync'}: ${_shortDateTime(lastSync)}',
+              ),
+              trailing: IconButton(
+                tooltip: isKo ? '\uC9C0\uAE08 \uB3D9\uAE30\uD654' : 'Sync now',
+                onPressed: _busy ? null : () => _run(widget.onSync),
+                icon: _busy
+                    ? const SizedBox.square(
+                        dimension: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.sync),
+              ),
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.phone_android_outlined),
+              title: Text(state.deviceName),
+              subtitle: Text(
+                '${isKo ? '\uC774 \uAE30\uAE30 \uD050' : 'This device queue'}: ${state.currentQueue?.queue.length ?? 0}',
+              ),
+            ),
+            if (state.remoteCandidate != null)
+              Material(
+                color: _Ui.accentDim,
+                borderRadius: BorderRadius.circular(8),
+                child: ListTile(
+                  leading: const Icon(Icons.devices, color: _Ui.accent),
+                  title: Text(
+                    isKo
+                        ? '${state.remoteCandidate!.deviceName}\uC758 \uCD5C\uC2E0 \uD050'
+                        : 'Latest queue from ${state.remoteCandidate!.deviceName}',
+                  ),
+                  subtitle: Text(
+                    strings.videoCount(
+                      state.remoteCandidate!.queue.queueIds.length,
+                    ),
+                  ),
+                  trailing: TextButton(
+                    onPressed: _busy
+                        ? null
+                        : () => _run(
+                            () => widget.onImportRemote(state.remoteCandidate!),
+                          ),
+                    child: Text(isKo ? '\uAC00\uC838\uC624\uAE30' : 'Import'),
+                  ),
+                ),
+              ),
+            if (otherDevices.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              for (final queue in otherDevices.values)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.computer_outlined),
+                  title: Text(queue.deviceName),
+                  subtitle: Text(
+                    '${strings.videoCount(queue.queue.queueIds.length)} · ${_shortDateTime(queue.updatedAt)}',
+                  ),
+                  trailing: TextButton(
+                    onPressed: _busy
+                        ? null
+                        : () => _run(() => widget.onImportRemote(queue)),
+                    child: Text(isKo ? '\uAC00\uC838\uC624\uAE30' : 'Import'),
+                  ),
+                ),
+            ],
+            const Divider(height: 28),
+            _SettingsSectionTitle(
+              title: isKo
+                  ? '\uD074\uB77C\uC6B0\uB4DC \uBC31\uC5C5'
+                  : 'Cloud backups',
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.backup_outlined),
+              title: Text(isKo ? '\uC9C0\uAE08 \uBC31\uC5C5' : 'Back up now'),
+              subtitle: Text(
+                state.lastBackupAt == null
+                    ? (isKo
+                          ? '\uC544\uC9C1 \uBC31\uC5C5 \uC5C6\uC74C'
+                          : 'No backup yet')
+                    : _shortDateTime(state.lastBackupAt!),
+              ),
+              onTap: _busy ? null : () => _run(widget.onBackup),
+            ),
+            if (_backups.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 18),
+                child: Text(
+                  isKo
+                      ? '\uBCF5\uC6D0\uD560 \uBC31\uC5C5\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.'
+                      : 'No backups available.',
+                  style: TextStyle(color: _Ui.text2),
+                ),
+              )
+            else
+              for (final backup in _backups)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.history),
+                  title: Text(_shortDateTime(backup.payload.createdAt)),
+                  subtitle: Text(
+                    '${backup.payload.deviceName} · ${strings.videoCount(backup.payload.activeVideoCount)} · ${backup.payload.activePlaylistCount} ${isKo ? '\uAC1C \uC7AC\uC0DD\uBAA9\uB85D' : 'playlists'}',
+                  ),
+                  trailing: TextButton(
+                    onPressed: _busy
+                        ? null
+                        : () async {
+                            final confirmed = await showDialog<bool>(
+                              context: context,
+                              builder: (context) => AlertDialog(
+                                title: Text(
+                                  isKo
+                                      ? '\uBC31\uC5C5 \uBCF5\uC6D0'
+                                      : 'Restore backup',
+                                ),
+                                content: Text(
+                                  isKo
+                                      ? 'Drive \uC601\uC0C1, \uC7AC\uC0DD\uBAA9\uB85D, \uD050\uB97C \uC774 \uC2DC\uC810\uC73C\uB85C \uBCF5\uC6D0\uD569\uB2C8\uB2E4. \uB85C\uCEEC \uC601\uC0C1\uC740 \uC720\uC9C0\uB429\uB2C8\uB2E4.'
+                                      : 'Restore Drive videos, playlists, and queue. Local videos stay on this device.',
+                                ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () =>
+                                        Navigator.pop(context, false),
+                                    child: Text(
+                                      MaterialLocalizations.of(
+                                        context,
+                                      ).cancelButtonLabel,
+                                    ),
+                                  ),
+                                  FilledButton(
+                                    onPressed: () =>
+                                        Navigator.pop(context, true),
+                                    child: Text(
+                                      isKo ? '\uBCF5\uC6D0' : 'Restore',
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                            if (confirmed == true) {
+                              await _run(() => widget.onRestore(backup));
+                            }
+                          },
+                    child: Text(isKo ? '\uBCF5\uC6D0' : 'Restore'),
+                  ),
+                ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  IconData _syncIcon(SyncPhase phase) => switch (phase) {
+    SyncPhase.syncing => Icons.sync,
+    SyncPhase.synced => Icons.cloud_done_outlined,
+    SyncPhase.offline => Icons.cloud_off_outlined,
+    SyncPhase.reconnectRequired => Icons.link_off,
+    SyncPhase.failed => Icons.error_outline,
+    SyncPhase.idle => Icons.cloud_outlined,
+  };
+
+  Color _syncColor(SyncPhase phase) => switch (phase) {
+    SyncPhase.synced => _Ui.accent,
+    SyncPhase.offline ||
+    SyncPhase.reconnectRequired ||
+    SyncPhase.failed => _Ui.red,
+    _ => _Ui.text2,
+  };
+
+  String _syncLabel(SyncPhase phase, bool isKo) => switch (phase) {
+    SyncPhase.syncing => isKo ? '\uB3D9\uAE30\uD654 \uC911' : 'Syncing',
+    SyncPhase.synced => isKo ? '\uB3D9\uAE30\uD654 \uC815\uC0C1' : 'Synced',
+    SyncPhase.offline => isKo ? '\uC624\uD504\uB77C\uC778' : 'Offline',
+    SyncPhase.reconnectRequired =>
+      isKo ? '\uC7AC\uC5F0\uACB0 \uD544\uC694' : 'Reconnect required',
+    SyncPhase.failed =>
+      isKo ? '\uB3D9\uAE30\uD654 \uC2E4\uD328' : 'Sync failed',
+    SyncPhase.idle => isKo ? '\uB300\uAE30 \uC911' : 'Idle',
+  };
+}
+
+class _SettingsSectionTitle extends StatelessWidget {
+  const _SettingsSectionTitle({required this.title});
+
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Text(
+        title,
+        style: TextStyle(
+          color: _Ui.text,
+          fontSize: 15,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+    );
+  }
+}
+
+class _DiagnosticsPage extends StatelessWidget {
+  const _DiagnosticsPage({
+    required this.strings,
+    required this.rows,
+    required this.events,
+    required this.onCopy,
+  });
+
+  final AppStrings strings;
+  final Map<String, String> rows;
+  final List<DiagnosticEvent> events;
+  final Future<void> Function() onCopy;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(strings.isKo ? '\uC9C4\uB2E8 \uB3C4\uAD6C' : 'Diagnostics'),
+        actions: [
+          IconButton(
+            tooltip: strings.isKo ? '\uB85C\uADF8 \uBCF5\uC0AC' : 'Copy logs',
+            onPressed: () async {
+              await onCopy();
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      strings.isKo
+                          ? '\uC9C4\uB2E8 \uB85C\uADF8\uB97C \uBCF5\uC0AC\uD588\uC2B5\uB2C8\uB2E4.'
+                          : 'Diagnostics copied.',
+                    ),
+                  ),
+                );
+              }
+            },
+            icon: const Icon(Icons.copy_all_outlined),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(18, 12, 18, 28),
+          children: [
+            for (final entry in rows.entries)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                title: Text(entry.key),
+                trailing: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 210),
+                  child: Text(
+                    entry.value,
+                    textAlign: TextAlign.end,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: _Ui.text2, fontSize: 12),
+                  ),
+                ),
+              ),
+            const Divider(height: 28),
+            _SettingsSectionTitle(
+              title: strings.isKo
+                  ? '\uCD5C\uADFC \uC774\uBCA4\uD2B8'
+                  : 'Recent events',
+            ),
+            if (events.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Text(
+                  strings.isKo
+                      ? '\uAE30\uB85D\uB41C \uC774\uBCA4\uD2B8\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.'
+                      : 'No events recorded.',
+                  style: TextStyle(color: _Ui.text2),
+                ),
+              )
+            else
+              for (final event in events)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  leading: Icon(
+                    event.failureKind == null
+                        ? Icons.info_outline
+                        : Icons.error_outline,
+                    color: event.failureKind == null ? _Ui.text3 : _Ui.red,
+                    size: 19,
+                  ),
+                  title: Text(
+                    event.message,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  subtitle: Text(
+                    '${event.category} · ${_shortDateTime(event.timestamp)} · ${event.httpStatus ?? '-'}',
+                  ),
+                ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RemoteQueueBanner extends StatelessWidget {
+  const _RemoteQueueBanner({
+    required this.state,
+    required this.strings,
+    required this.onImport,
+    required this.onDismiss,
+  });
+
+  final CloudPlaybackState state;
+  final AppStrings strings;
+  final Future<void> Function() onImport;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    final isKo = strings.isKo;
+    return ColoredBox(
+      color: _Ui.accentDim,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
+        child: Row(
+          children: [
+            const Icon(Icons.devices, color: _Ui.accent, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    isKo
+                        ? '${state.deviceName}\uC5D0\uC11C \uBCF4\uB358 \uD050\uAC00 \uC788\uC2B5\uB2C8\uB2E4'
+                        : 'A newer queue is available from ${state.deviceName}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: _Ui.text,
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  Text(
+                    isKo
+                        ? '${state.queue.queueIds.length}\uAC1C \uC601\uC0C1 \u00B7 ${_shortDateTime(state.updatedAt)}'
+                        : '${state.queue.queueIds.length} videos · ${_shortDateTime(state.updatedAt)}',
+                    style: TextStyle(color: _Ui.text2, fontSize: 10.5),
+                  ),
+                ],
+              ),
+            ),
+            TextButton(
+              onPressed: () async => onImport(),
+              child: Text(isKo ? '\uAC00\uC838\uC624\uAE30' : 'Import'),
+            ),
+            IconButton(
+              tooltip: MaterialLocalizations.of(context).closeButtonTooltip,
+              onPressed: onDismiss,
+              icon: const Icon(Icons.close, size: 18),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _QueueHubPage extends StatelessWidget {
+  const _QueueHubPage({
+    required this.strings,
+    required this.current,
+    required this.recentQueues,
+    required this.deviceQueues,
+    required this.videoById,
+    required this.ownDeviceId,
+    required this.onPlayCurrent,
+    required this.onRestoreRecent,
+    required this.onImportDeviceQueue,
+  });
+
+  final AppStrings strings;
+  final PlaybackStateSummary? current;
+  final List<RecentQueueSnapshot> recentQueues;
+  final List<CloudPlaybackState> deviceQueues;
+  final Map<String, VideoItem> videoById;
+  final String ownDeviceId;
+  final Future<void> Function(int index) onPlayCurrent;
+  final Future<void> Function(RecentQueueSnapshot snapshot) onRestoreRecent;
+  final Future<void> Function(CloudPlaybackState state) onImportDeviceQueue;
+
+  @override
+  Widget build(BuildContext context) {
+    final isKo = strings.isKo;
+    return DefaultTabController(
+      length: 3,
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(isKo ? '\uD050' : 'Queues'),
+          bottom: TabBar(
+            labelColor: _Ui.accent,
+            unselectedLabelColor: _Ui.text2,
+            indicatorColor: _Ui.accent,
+            tabs: [
+              Tab(text: isKo ? '\uD604\uC7AC \uD050' : 'Current'),
+              Tab(text: isKo ? '\uCD5C\uADFC \uD050' : 'Recent'),
+              Tab(text: isKo ? '\uB2E4\uB978 \uAE30\uAE30' : 'Devices'),
+            ],
+          ),
+        ),
+        body: TabBarView(
+          children: [
+            _currentQueue(context),
+            _recentQueueList(context),
+            _deviceQueueList(context),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _currentQueue(BuildContext context) {
+    final summary = current;
+    if (summary == null || summary.queue.isEmpty) {
+      return _queueEmpty(strings.queueEmpty);
+    }
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+      itemCount: summary.queue.length + 1,
+      separatorBuilder: (_, _) => Divider(color: _Ui.border, height: 1),
+      itemBuilder: (context, index) {
+        if (index == 0) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: [
+                _QueueModeChip(
+                  icon: summary.shuffleEnabled
+                      ? Icons.shuffle
+                      : Icons.format_list_numbered,
+                  label: summary.shuffleEnabled
+                      ? (strings.isKo ? '\uC154\uD50C' : 'Shuffle')
+                      : (strings.isKo ? '\uC21C\uC11C' : 'In order'),
+                ),
+                _QueueModeChip(
+                  icon: summary.repeatMode == PlayerRepeatMode.one
+                      ? Icons.repeat_one
+                      : Icons.repeat,
+                  label: switch (summary.repeatMode) {
+                    PlayerRepeatMode.off =>
+                      strings.isKo ? '\uBC18\uBCF5 \uAEBC\uC9D0' : 'Repeat off',
+                    PlayerRepeatMode.all =>
+                      strings.isKo ? '\uC804\uCCB4 \uBC18\uBCF5' : 'Repeat all',
+                    PlayerRepeatMode.one =>
+                      strings.isKo
+                          ? '\uD55C \uC601\uC0C1 \uBC18\uBCF5'
+                          : 'Repeat one',
+                  },
+                ),
+                _QueueModeChip(
+                  icon: Icons.video_collection_outlined,
+                  label: strings.videoCount(summary.queue.length),
+                ),
+              ],
+            ),
+          );
+        }
+        final itemIndex = index - 1;
+        final item = summary.queue[itemIndex];
+        final selected = itemIndex == summary.currentIndex;
+        return Material(
+          color: selected ? _Ui.accentDim : Colors.transparent,
+          borderRadius: BorderRadius.circular(6),
+          child: ListTile(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+            leading: Icon(
+              selected ? Icons.play_arrow : Icons.video_file_outlined,
+              color: selected ? _Ui.accent : _Ui.text3,
+            ),
+            title: Text(
+              item.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: selected ? _Ui.accent : _Ui.text,
+                fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+              ),
+            ),
+            subtitle: Text(selected ? strings.nowPlaying : strings.tapToPlay),
+            onTap: () async {
+              await onPlayCurrent(itemIndex);
+              if (context.mounted) Navigator.pop(context);
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _recentQueueList(BuildContext context) {
+    final queues = recentQueues
+        .where((queue) => queue.queueIds.any(videoById.containsKey))
+        .toList(growable: false);
+    if (queues.isEmpty) {
+      return _queueEmpty(
+        strings.isKo
+            ? '\uC544\uC9C1 \uC800\uC7A5\uB41C \uCD5C\uADFC \uD050\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.'
+            : 'No recent queues yet.',
+      );
+    }
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+      itemCount: queues.length,
+      separatorBuilder: (_, _) => const SizedBox(height: 8),
+      itemBuilder: (context, index) {
+        final queue = queues[index];
+        return _QueueSnapshotTile(
+          title: queue.title ?? strings.currentQueue,
+          subtitle:
+              '${queue.deviceName} · ${strings.videoCount(queue.queueIds.length)} · ${_shortDateTime(queue.updatedAt)}',
+          shuffleEnabled: queue.shuffleEnabled,
+          onImport: () async {
+            await onRestoreRecent(queue);
+            if (context.mounted) Navigator.pop(context);
+          },
+          isKo: strings.isKo,
+        );
+      },
+    );
+  }
+
+  Widget _deviceQueueList(BuildContext context) {
+    final byDevice = <String, CloudPlaybackState>{};
+    for (final queue in deviceQueues) {
+      if (queue.deviceId == ownDeviceId || queue.queue.queueIds.isEmpty) {
+        continue;
+      }
+      final existing = byDevice[queue.deviceId];
+      if (existing == null || queue.updatedAt.isAfter(existing.updatedAt)) {
+        byDevice[queue.deviceId] = queue;
+      }
+    }
+    final queues = byDevice.values.toList()
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    if (queues.isEmpty) {
+      return _queueEmpty(
+        strings.isKo
+            ? '\uB2E4\uB978 \uAE30\uAE30\uC5D0\uC11C \uC800\uC7A5\uB41C \uD050\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.'
+            : 'No queues from other devices.',
+      );
+    }
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+      itemCount: queues.length,
+      separatorBuilder: (_, _) => const SizedBox(height: 8),
+      itemBuilder: (context, index) {
+        final queue = queues[index];
+        return _QueueSnapshotTile(
+          title: queue.queue.title ?? queue.deviceName,
+          subtitle:
+              '${queue.deviceName} · ${strings.videoCount(queue.queue.queueIds.length)} · ${_shortDateTime(queue.updatedAt)}',
+          shuffleEnabled: queue.queue.shuffleEnabled,
+          onImport: () async {
+            await onImportDeviceQueue(queue);
+            if (context.mounted) Navigator.pop(context);
+          },
+          isKo: strings.isKo,
+        );
+      },
+    );
+  }
+
+  Widget _queueEmpty(String message) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.queue_music_outlined, color: _Ui.text3, size: 42),
+            const SizedBox(height: 12),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: _Ui.text2),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _QueueModeChip extends StatelessWidget {
+  const _QueueModeChip({required this.icon, required this.label});
+
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+      decoration: BoxDecoration(
+        color: _Ui.surface2,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: _Ui.text2),
+          const SizedBox(width: 5),
+          Text(label, style: TextStyle(color: _Ui.text2, fontSize: 11)),
+        ],
+      ),
+    );
+  }
+}
+
+class _QueueSnapshotTile extends StatelessWidget {
+  const _QueueSnapshotTile({
+    required this.title,
+    required this.subtitle,
+    required this.shuffleEnabled,
+    required this.onImport,
+    required this.isKo,
+  });
+
+  final String title;
+  final String subtitle;
+  final bool shuffleEnabled;
+  final Future<void> Function() onImport;
+  final bool isKo;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: _Ui.card,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+        child: Row(
+          children: [
+            Icon(
+              shuffleEnabled ? Icons.shuffle : Icons.format_list_numbered,
+              color: _Ui.accent,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: _Ui.text,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: _Ui.text2, fontSize: 10.5),
+                  ),
+                ],
+              ),
+            ),
+            TextButton(
+              onPressed: () async => onImport(),
+              child: Text(isKo ? '\uAC00\uC838\uC624\uAE30' : 'Import'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+String _shortDateTime(DateTime value) {
+  final local = value.toLocal();
+  return '${local.year.toString().padLeft(4, '0')}-'
+      '${local.month.toString().padLeft(2, '0')}-'
+      '${local.day.toString().padLeft(2, '0')} '
+      '${local.hour.toString().padLeft(2, '0')}:'
+      '${local.minute.toString().padLeft(2, '0')}';
 }
 
 class _MiniPlayer extends StatefulWidget {
@@ -5224,6 +7891,7 @@ class _DrivePickerDialogState extends State<_DrivePickerDialog> {
         DriveImportResult(
           items: items,
           sourceName: sourceName,
+          sourceFolders: {for (final folder in folders) folder.id: folder.name},
           foldersScanned: foldersScanned,
           videosFound: videosFound,
           createPlaylist: folders.isNotEmpty,
@@ -5294,7 +7962,9 @@ class _DrivePickerDialogState extends State<_DrivePickerDialog> {
                           return Center(child: Text(snapshot.error.toString()));
                         }
 
-                        final entries = snapshot.data ?? const [];
+                        final entries = (snapshot.data ?? const <DriveEntry>[])
+                            .where((entry) => !entry.isSubtitle)
+                            .toList(growable: false);
                         _visibleEntries = entries;
                         if (entries.isEmpty) {
                           return const Center(

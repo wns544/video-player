@@ -50,4 +50,5 @@ dependencies {
     implementation("androidx.media3:media3-session:$media3Version")
     implementation("androidx.media3:media3-datasource:$media3Version")
     implementation("androidx.media3:media3-ui:$media3Version")
+    implementation("androidx.recyclerview:recyclerview:1.4.0")
 }

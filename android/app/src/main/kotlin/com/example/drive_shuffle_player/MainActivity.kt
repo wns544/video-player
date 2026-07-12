@@ -6,12 +6,14 @@ import android.database.Cursor
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.util.Log
 import java.io.ByteArrayOutputStream
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
@@ -25,6 +27,7 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     private lateinit var controllerFuture: ListenableFuture<MediaController>
     private var pendingPickResult: MethodChannel.Result? = null
+    private var pendingSubtitleResult: MethodChannel.Result? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -42,6 +45,8 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "pickLocalVideos" -> pickLocalVideos(result)
+                    "pickSubtitleFile" -> pickSubtitleFile(result)
+                    "getPlatformInfo" -> result.success(platformInfo())
                     "openPlayer" -> withController(result) { controller ->
                         openPlayer(controller, result)
                     }
@@ -53,6 +58,9 @@ class MainActivity : FlutterActivity() {
                     }
                     "getPlaybackState" -> withController(result) { controller ->
                         result.success(playbackState(controller))
+                    }
+                    "updatePlayerPreferences" -> withController(result) { controller ->
+                        updatePlayerPreferences(call, controller, result)
                     }
                     "playPause" -> withController(result) { controller ->
                         if (controller.isPlaying) controller.pause() else controller.play()
@@ -71,6 +79,10 @@ class MainActivity : FlutterActivity() {
                         controller.clearMediaItems()
                         PlaybackAuth.authError = false
                         PlaybackAuth.lastHttpStatusCode = null
+                        PlaybackAuth.lastErrorKind = null
+                        PlaybackAuth.lastErrorMessage = null
+                        PlaybackAuth.lastErrorMediaId = null
+                        PlaybackSessionState.originalQueue = emptyList()
                         result.success(null)
                     }
                     else -> result.notImplemented()
@@ -86,6 +98,34 @@ class MainActivity : FlutterActivity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == PICK_SUBTITLE_REQUEST) {
+            val result = pendingSubtitleResult ?: return
+            pendingSubtitleResult = null
+            if (resultCode != RESULT_OK || data?.data == null) {
+                result.success(null)
+                return
+            }
+            val uri = data.data!!
+            try {
+                contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            } catch (_: SecurityException) {
+                // Some document providers grant read access without persistence.
+            }
+            val name = displayNameFor(uri)
+            val mimeType = contentResolver.getType(uri) ?: mimeTypeForSubtitle(name)
+            result.success(
+                mapOf(
+                    "kind" to "local",
+                    "uri" to uri.toString(),
+                    "mimeType" to mimeType,
+                    "label" to name,
+                ),
+            )
+            return
+        }
         if (requestCode != PICK_VIDEOS_REQUEST) return
 
         val result = pendingPickResult ?: return
@@ -133,6 +173,49 @@ class MainActivity : FlutterActivity() {
             addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
         }
         startActivityForResult(intent, PICK_VIDEOS_REQUEST)
+    }
+
+    private fun pickSubtitleFile(result: MethodChannel.Result) {
+        if (pendingSubtitleResult != null) {
+            result.error("PICKER_BUSY", "A subtitle picker is already open.", null)
+            return
+        }
+        pendingSubtitleResult = result
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(
+                Intent.EXTRA_MIME_TYPES,
+                arrayOf("application/x-subrip", "application/srt", "text/vtt", "text/plain"),
+            )
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        startActivityForResult(intent, PICK_SUBTITLE_REQUEST)
+    }
+
+    private fun mimeTypeForSubtitle(name: String): String {
+        return if (name.lowercase().endsWith(".vtt")) MimeTypes.TEXT_VTT else MimeTypes.APPLICATION_SUBRIP
+    }
+
+    private fun platformInfo(): Map<String, Any?> {
+        val packageInfo = packageManager.getPackageInfo(packageName, 0)
+        val versionName = packageInfo.versionName ?: "0.0.0"
+        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            packageInfo.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo.versionCode.toLong()
+        }
+        val model = listOf(Build.MANUFACTURER, Build.MODEL)
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+            .trim()
+        return mapOf(
+            "model" to model,
+            "androidVersion" to "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
+            "appVersion" to "$versionName+$versionCode",
+        )
     }
 
     private fun openPlayer() {
@@ -238,16 +321,7 @@ class MainActivity : FlutterActivity() {
             return
         }
 
-        val mediaItems = items.mapNotNull { item ->
-            val uri = item["uri"] as? String ?: return@mapNotNull null
-            val title = item["title"] as? String ?: "Untitled video"
-            val id = item["id"] as? String ?: uri
-            MediaItem.Builder()
-                .setMediaId(id)
-                .setUri(uri)
-                .setMediaMetadata(MediaMetadata.Builder().setTitle(title).build())
-                .build()
-        }
+        val mediaItems = items.mapNotNull(::mediaItemFromMap)
         if (mediaItems.isEmpty()) {
             Log.d(TAG, "playQueue blocked: no valid media items")
             result.error("EMPTY_QUEUE", "No playable videos were provided.", null)
@@ -257,15 +331,86 @@ class MainActivity : FlutterActivity() {
         PlaybackAuth.bearerToken = call.argument<String>("accessToken")
         PlaybackAuth.authError = false
         PlaybackAuth.lastHttpStatusCode = null
+        PlaybackAuth.lastErrorKind = null
+        PlaybackAuth.lastErrorMessage = null
+        PlaybackAuth.lastErrorMediaId = null
+        val originalItems = call
+            .argument<List<Map<String, Any?>>>("originalItems")
+            .orEmpty()
+            .mapNotNull(::mediaItemFromMap)
+        val repeatMode = repeatModeFromName(call.argument<String>("repeatMode"))
+        val shuffleEnabled = call.argument<Boolean>("shuffleEnabled") ?: false
+        PlaybackSessionState.originalQueue = originalItems.ifEmpty { mediaItems }
+        PlaybackSessionState.repeatMode = repeatMode
+        PlaybackSessionState.shuffleEnabled = shuffleEnabled
+        PlaybackSessionState.failurePolicy = call.argument<String>("failurePolicy") ?: "ask"
+        PlaybackSessionState.resizeMode = call.argument<String>("resizeMode") ?: "fit"
         val requestedStartIndex = call.argument<Int>("startIndex") ?: 0
         val startPositionMs = (call.argument<Number>("startPositionMs") ?: 0).toLong()
         val startIndex = requestedStartIndex.coerceIn(0, mediaItems.size - 1)
         controller.setMediaItems(mediaItems, startIndex, startPositionMs.coerceAtLeast(0L))
-        controller.repeatMode = Player.REPEAT_MODE_ALL
+        controller.repeatMode = repeatMode
+        controller.shuffleModeEnabled = false
         controller.prepare()
         controller.play()
         Log.d(TAG, "playQueue loaded: mediaItemCount=${mediaItems.size}, startIndex=$startIndex")
         result.success(mediaItems.size)
+    }
+
+    private fun mediaItemFromMap(item: Map<String, Any?>): MediaItem? {
+        val uri = item["uri"] as? String ?: return null
+        val title = item["title"] as? String ?: "Untitled video"
+        val id = item["id"] as? String ?: uri
+        val builder = MediaItem.Builder()
+            .setMediaId(id)
+            .setUri(uri)
+            .setMediaMetadata(MediaMetadata.Builder().setTitle(title).build())
+        val subtitle = item["subtitle"] as? Map<*, *>
+        val subtitleUri = subtitle?.get("uri") as? String
+        if (!subtitleUri.isNullOrBlank()) {
+            val label = subtitle["label"] as? String
+            val language = subtitle["language"] as? String
+            val mimeType = subtitle["mimeType"] as? String ?: mimeTypeForSubtitle(label.orEmpty())
+            val configuration = MediaItem.SubtitleConfiguration.Builder(Uri.parse(subtitleUri))
+                .setMimeType(mimeType)
+                .apply {
+                    if (!label.isNullOrBlank()) setLabel(label)
+                    if (!language.isNullOrBlank()) setLanguage(language)
+                }
+                .build()
+            builder.setSubtitleConfigurations(listOf(configuration))
+        }
+        return builder.build()
+    }
+
+    private fun repeatModeFromName(name: String?): Int {
+        return when (name) {
+            "off" -> Player.REPEAT_MODE_OFF
+            "one" -> Player.REPEAT_MODE_ONE
+            else -> Player.REPEAT_MODE_ALL
+        }
+    }
+
+    private fun updatePlayerPreferences(
+        call: MethodCall,
+        controller: MediaController,
+        result: MethodChannel.Result,
+    ) {
+        call.argument<String>("repeatMode")?.let { value ->
+            val mode = repeatModeFromName(value)
+            PlaybackSessionState.repeatMode = mode
+            controller.repeatMode = mode
+        }
+        call.argument<Boolean>("shuffleEnabled")?.let { value ->
+            PlaybackSessionState.shuffleEnabled = value
+        }
+        call.argument<String>("failurePolicy")?.let { value ->
+            PlaybackSessionState.failurePolicy = value
+        }
+        call.argument<String>("resizeMode")?.let { value ->
+            PlaybackSessionState.resizeMode = value
+        }
+        result.success(null)
     }
 
     private fun updateAccessToken(
@@ -276,6 +421,9 @@ class MainActivity : FlutterActivity() {
         PlaybackAuth.bearerToken = call.argument<String>("accessToken")
         PlaybackAuth.authError = false
         PlaybackAuth.lastHttpStatusCode = null
+        PlaybackAuth.lastErrorKind = null
+        PlaybackAuth.lastErrorMessage = null
+        PlaybackAuth.lastErrorMediaId = null
         val retry = call.argument<Boolean>("retry") ?: false
         if (retry && controller.mediaItemCount > 0) {
             val position = controller.currentPosition.coerceAtLeast(0L)
@@ -300,16 +448,37 @@ class MainActivity : FlutterActivity() {
             "isPlaying" to controller.isPlaying,
             "mediaItemCount" to controller.mediaItemCount,
             "repeatMode" to controller.repeatMode,
+            "shuffleEnabled" to PlaybackSessionState.shuffleEnabled,
+            "originalQueueIds" to PlaybackSessionState.originalQueue.map { it.mediaId },
+            "failurePolicy" to PlaybackSessionState.failurePolicy,
+            "resizeMode" to PlaybackSessionState.resizeMode,
             "playbackState" to controller.playbackState,
             "authError" to PlaybackAuth.authError,
             "httpStatusCode" to PlaybackAuth.lastHttpStatusCode,
             "playerErrorCode" to controller.playerError?.errorCodeName,
+            "lastErrorKind" to PlaybackAuth.lastErrorKind,
+            "lastErrorMessage" to PlaybackAuth.lastErrorMessage,
+            "lastErrorMediaId" to PlaybackAuth.lastErrorMediaId,
+            "subtitle" to controller.currentMediaItem
+                ?.localConfiguration
+                ?.subtitleConfigurations
+                ?.firstOrNull()
+                ?.let { subtitle ->
+                    mapOf(
+                        "kind" to if (subtitle.uri.scheme == "content") "local" else "drive",
+                        "uri" to subtitle.uri.toString(),
+                        "mimeType" to subtitle.mimeType,
+                        "label" to subtitle.label,
+                        "language" to subtitle.language,
+                    )
+                },
         )
     }
 
     companion object {
         private const val CHANNEL = "drive_shuffle_player/playback"
         private const val PICK_VIDEOS_REQUEST = 4210
+        private const val PICK_SUBTITLE_REQUEST = 4211
         private const val TAG = "DriveShuffleMain"
     }
 }
